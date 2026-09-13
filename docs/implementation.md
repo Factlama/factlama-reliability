@@ -1,5 +1,7 @@
 # Reliability Implementation Plan
 
+For concrete modules, algorithms, persistence, HTTP behavior and acceptance fixtures, use [LOW_LEVEL_IMPLEMENTATION.md](LOW_LEVEL_IMPLEMENTATION.md). This file owns task status; a task is not complete solely because it appears in the specification.
+
 Status values: `NOT_STARTED`, `IN_PROGRESS`, `BLOCKED`, `COMPLETE`.
 
 A task is COMPLETE only when code, tests, failure handling, tenant isolation, observability, documentation, and acceptance criteria are satisfied.
@@ -86,6 +88,27 @@ A task is COMPLETE only when code, tests, failure handling, tenant isolation, ob
 - [ ] Error contract.
 - [ ] Example groundedness request.
 - [ ] Example tenant-isolated usage.
+
+## REL-13 Evaluator ecosystem — STATUS: NOT_STARTED
+- [ ] Tenant-approved provider registry and second/custom adapter path.
+- [ ] Evaluator/configuration versioning and contract fixture suite.
+- [ ] Explicit fallback provenance, quota and cost controls.
+
+**Acceptance:** two adapters pass the same normalized success, ambiguity, timeout and malformed-response fixtures.
+
+## REL-14 RAG and agent evaluation — STATUS: NOT_STARTED
+- [ ] Citation support and retrieval quality signals with evidence lineage.
+- [ ] Instruction adherence and tool selection/argument/result checks.
+- [ ] Explicit `UNAVAILABLE` dimensions where an evaluator is absent.
+
+**Acceptance:** each new dimension has a versioned method, golden cases and provenance; it does not change MVP groundedness semantics implicitly.
+
+## REL-15 Benchmark and SLM gate — STATUS: NOT_STARTED
+- [ ] Hand-reviewed development/test sets and leakage controls.
+- [ ] Human/strong-judge baseline, per-class precision/recall/F1, calibration, latency and cost.
+- [ ] SLM adapter only after a documented benchmark decision.
+
+**Acceptance:** routing preference is based on reproducible results and thresholds approved in an ADR, not model size or cost claims alone.
 
 ## MVP end-product expectation
 

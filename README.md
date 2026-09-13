@@ -1,5 +1,7 @@
 # FactLama Reliability
 
+Start with [the low-level implementation checklist](docs/LOW_LEVEL_IMPLEMENTATION.md) to see the code units, algorithm and reviewer tests. Supporting specifications: [domain model](docs/domain-model.md), [claim engine](docs/claim-engine.md), [evidence engine](docs/evidence-engine.md), [judge provider](docs/judge-provider.md), [verification pipeline](docs/verification-pipeline.md), [scoring](docs/scoring.md), [policy](docs/policy-engine.md), [async execution](docs/async-evaluation.md), and [HTTP API](docs/API.md). The architecture repository's `CONTRACTS.md` owns shared wire semantics.
+
 The FactLama Reliability repository contains the semantic evaluation and decision engine for LLM, RAG and agentic applications.
 
 The system-level source of truth lives in `Factlama/factlama-architecture`. This repository implements those contracts and must not silently redefine them.
@@ -51,7 +53,6 @@ factlama-reliability/
 ├── models/
 │   └── interfaces/
 ├── api/
-├── sdk/
 ├── tests/
 └── docs/
 ```
@@ -66,7 +67,7 @@ Conceptual interface:
 
 ```python
 class JudgeProvider(Protocol):
-    def evaluate(self, request: VerificationRequest) -> JudgeResult:
+    def evaluate(self, request: JudgeRequest, deadline: float, cancellation: CancellationToken) -> JudgeResult:
         ...
 ```
 
@@ -80,8 +81,8 @@ Evidence retrieval is optional and pluggable. Direct evidence supplied in the re
 
 Initial logical stages:
 
-1. validate and normalize request;
-2. establish tenant/context IDs;
+1. authenticate and establish trusted tenant/context IDs;
+2. validate and normalize request within authorized scope;
 3. segment output into verifiable claims;
 4. map supplied evidence to claims;
 5. execute configured evaluator/judge;
@@ -190,7 +191,7 @@ At minimum where available:
 
 The first scoring implementation must be transparent, deterministic and easy to replace. Do not hide logic in a second LLM prompt.
 
-A reasonable first model can weight groundedness most heavily, followed by citation support, instruction adherence, tool correctness and confidence alignment, then subtract explicit risk penalties. Exact weights must be configuration/versioned and covered by tests.
+The v0.1 formulas and verdict precedence are specified in [scoring.md](docs/scoring.md). Future weighted composites require a separately named, versioned method, benchmark evidence and tests; missing dimensions are never assigned invented values.
 
 ## Evaluation modes
 
@@ -234,107 +235,7 @@ The same logical evaluation must work synchronously and asynchronously, respect 
 
 ## Implementation plan and status
 
-Status values: `NOT_STARTED`, `IN_PROGRESS`, `BLOCKED`, `COMPLETE`.
-
-### REL-01 Repository/Foundation - STATUS: NOT_STARTED
-
-- [ ] Choose runtime/package structure consistent with architecture.
-- [ ] Add lint/type/test tooling.
-- [ ] Define configuration loader and environment conventions.
-- [ ] Add CI.
-- [ ] Document local development commands.
-
-Acceptance: clean checkout installs, validates types/lint and runs tests.
-
-### REL-02 Tenant Context - STATUS: NOT_STARTED
-
-- [ ] Define tenant/project/application context types.
-- [ ] Propagate context through service/persistence boundaries.
-- [ ] Add negative cross-tenant tests.
-
-Acceptance: tests demonstrate tenant A cannot read/write tenant B records.
-
-### REL-03 Contracts - STATUS: NOT_STARTED
-
-- [ ] Implement versioned verification request.
-- [ ] Implement evidence/source/instruction/citation/tool models.
-- [ ] Implement claim/finding/result/verdict/score/violation models.
-- [ ] Implement provenance model.
-- [ ] Add serialization/schema tests.
-
-Acceptance: contracts round-trip without evaluator-specific fields leaking into the public result.
-
-### REL-04 First Groundedness Vertical Slice - STATUS: NOT_STARTED
-
-- [ ] Validate input.
-- [ ] Segment claims.
-- [ ] Map supplied evidence.
-- [ ] Implement `JudgeProvider` interface.
-- [ ] Implement one provider adapter.
-- [ ] Normalize evaluator response.
-- [ ] Produce claim findings.
-- [ ] Compute transparent score/verdict.
-- [ ] Record provenance.
-- [ ] Expose through API/service entry point.
-- [ ] Emit telemetry.
-
-Acceptance: golden supported, contradicted, unsupported and insufficient-evidence cases pass end-to-end.
-
-### REL-05 Async Evaluation - STATUS: NOT_STARTED
-
-- [ ] Define job states.
-- [ ] Implement idempotency.
-- [ ] Add retry/backoff/terminal-failure behavior.
-- [ ] Add duplicate-delivery tests.
-
-Acceptance: retrying the same logical request does not create duplicate logical evaluations.
-
-### REL-06 Content Governance - STATUS: NOT_STARTED
-
-- [ ] Add capture-mode configuration.
-- [ ] Add pre-persistence redaction interface.
-- [ ] Separate result/provenance storage from optional content storage.
-
-Acceptance: all MVP tests pass with raw interaction-content persistence disabled.
-
-### REL-07 Second Provider / Provider Registry - STATUS: NOT_STARTED
-
-- [ ] Implement registry/configuration.
-- [ ] Add second/custom provider path.
-- [ ] Normalize timeout/rate-limit/provider failure semantics.
-
-Acceptance: switching providers does not change public result shape.
-
-### REL-08 Policy Engine - STATUS: NOT_STARTED
-
-- [ ] Define policy inputs and actions.
-- [ ] Add deterministic threshold/rule policies.
-- [ ] Record policy provenance.
-
-Acceptance: identical normalized result + policy version yields repeatable action.
-
-### REL-09 RAG Evaluation - STATUS: NOT_STARTED
-
-- [ ] Context relevance/precision foundations.
-- [ ] Answer-groundedness integration.
-- [ ] Retrieval provenance/correlation.
-
-### REL-10 Agent/Tool Evaluation - STATUS: NOT_STARTED
-
-- [ ] Tool selection evaluation.
-- [ ] Argument/result consistency.
-- [ ] Trajectory evaluation foundation.
-
-### REL-11 Benchmark Harness - STATUS: NOT_STARTED
-
-- [ ] Golden datasets.
-- [ ] Accuracy/precision/recall/F1.
-- [ ] False-positive/negative reporting.
-- [ ] Calibration.
-- [ ] Latency/token/cost metrics.
-- [ ] Human/baseline judge comparisons.
-
-Do not move the FactLama SLM into production routing until explicit benchmark gates are met.
+[`docs/implementation.md`](docs/implementation.md) is the sole status ledger for REL tasks. Its task IDs, acceptance criteria and `NOT_STARTED` state are authoritative. This README describes architecture and must not duplicate task numbering.
 
 ## Claude implementation instructions
 
