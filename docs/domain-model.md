@@ -1,7 +1,0 @@
-# Reliability domain model
-
-The [cross-repository contract](https://github.com/Factlama/factlama-architecture/blob/main/CONTRACTS.md) defines the wire format. Internally, an evaluation is a tenant-scoped aggregate keyed by `evaluation_id`; it owns immutable request identity, claim findings, evidence references, score set, violations, policy decision and provenance. A claim is an independently testable proposition, with stable ID and optional answer span. Evidence is a sourced item, not an assertion of truth. A citation is an answer-to-evidence pointer; citation presence alone is not support. A finding is a normalized judgement on one claim. A violation identifies a specific rule breach. The factual verdict, score, and policy action are separate concepts.
-
-Domain invariants: claim/evidence IDs are unique within one request; findings only refer to known IDs; one claim has exactly one final normalized verdict; every measured score names a method version; every result records evaluator provenance; no factual `FAIL` comes from infrastructure failure; authorization scope is carried through every port. Explicit claims bypass extraction. Raw content is processed ephemerally in metadata-only mode and is never required in the result store.
-
-Dependency direction: `domain` and `contracts` import no vendor SDK or database client. `claims`, `evidence`, `scoring`, and `policy` depend inward. `evaluators`, `api`, and `persistence` implement ports. The Observability dependency is an outbound event port, not a direct query/database dependency.

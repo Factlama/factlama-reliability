@@ -1,5 +1,0 @@
-# Async execution and idempotency
-
-Submission commits a tenant-scoped job and idempotency mapping before returning 202. A worker lease prevents concurrent ownership but duplicate delivery is expected; result persistence uses a unique `(tenant_id,evaluation_id)` key and compare-and-set state transitions. States are `QUEUED -> RUNNING -> SUCCEEDED|FAILED|CANCELLED`; expired leases return to QUEUED until bounded attempts/deadline are exhausted. Terminal states cannot be overwritten by late workers. A cancellation request is best effort and must be checked before each external call and commit.
-
-Retry `RATE_LIMIT` and `UNAVAILABLE` with exponential backoff plus jitter under a total deadline; do not retry invalid schema, authorization, configuration or malformed provider responses. On terminal failure, keep a sanitized error and attempt history inspectable to authorized operators; a dead-letter/recovery path must permit explicit requeue with a new attempt while preserving logical evaluation identity. Emit queue age, attempt, terminal failure and dedup metrics. Outbox delivery of `ReliabilityEvent` is at least once with stable event ID.
