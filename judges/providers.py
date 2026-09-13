@@ -7,6 +7,7 @@ and returns one normalized verdict or a typed error. Claim segmentation
 `core.claims`'s job, not a judge's.
 """
 
+import re
 import time
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -83,21 +84,84 @@ class JudgeResult(BaseModel):
         return self
 
 
-def validate_judge_result(result: JudgeResult) -> JudgeResult:
+def validate_judge_result(result: JudgeResult, request: JudgeRequest) -> JudgeResult:
     """Downgrade a malformed judge response to a typed error before it reaches core.
 
-    CONTRACTS.md: "SUPPORTED without a cited evidence ID is INVALID_RESPONSE."
-    A provider must not be trusted to enforce this itself -- it is checked once,
-    here, for every provider's output.
+    CONTRACTS.md: "SUPPORTED without a cited evidence ID is INVALID_RESPONSE." A
+    provider must not be trusted to enforce this itself, nor to cite only
+    evidence IDs that were actually part of its request -- a citation to an ID
+    the judge was never given is not a real citation and must not be trusted
+    any more than citing nothing at all. Both are checked once, here, for
+    every provider's output.
     """
-    if result.error is None and result.verdict == ClaimVerdict.SUPPORTED and not result.evidence:
+    if result.error is not None or result.verdict != ClaimVerdict.SUPPORTED:
+        return result
+
+    valid_evidence_ids = {e.id for e in request.evidence}
+    if not result.evidence or any(ref.evidence_id not in valid_evidence_ids for ref in result.evidence):
         return JudgeResult(
             error=JudgeError(
                 code=JudgeErrorCode.INVALID_RESPONSE,
-                message="SUPPORTED verdict returned without any cited evidence ID",
+                message="SUPPORTED verdict cites no evidence ID, or an evidence ID absent from the request",
             )
         )
     return result
+
+
+_CITATION_OVERLAP_STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "of", "in", "on", "at", "to",
+    "and", "or", "by", "with", "that", "this", "it", "as", "be", "for", "from",
+    "its", "has", "have", "had", "not",
+}
+
+
+def _content_words(text: str) -> set[str]:
+    """Lowercased alphanumeric tokens with common stopwords removed."""
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in _CITATION_OVERLAP_STOPWORDS}
+
+
+def apply_citation_support_check(
+    result: JudgeResult,
+    request: JudgeRequest,
+) -> tuple[JudgeResult, bool]:
+    """Run CONTRACTS.md's conservative, non-model overlap/support check on a
+    SUPPORTED verdict's cited evidence.
+
+    This runs after `validate_judge_result()` has already rejected a
+    nonexistent evidence ID as INVALID_RESPONSE; here every cited ID is real,
+    but a judge can still confidently cite genuine evidence that has nothing
+    to do with the claim. Deliberately weak: it only downgrades when a claim
+    and every one of its cited evidence texts share *zero* non-trivial
+    content words -- a clearly fabricated citation, not merely a paraphrase.
+    "Lexical overlap alone is never proof, and legitimate paraphrase is not
+    rejected solely for lacking shared words" (CONTRACTS.md), so any nonzero
+    overlap passes unchanged.
+
+    Returns the (possibly downgraded) result and whether it downgraded.
+    """
+    if result.error is not None or result.verdict != ClaimVerdict.SUPPORTED:
+        return result, False
+
+    claim_words = _content_words(request.claim.text)
+    if not claim_words:
+        return result, False
+
+    evidence_by_id = {e.id: e for e in request.evidence}
+    has_support = any(
+        claim_words & _content_words(evidence_by_id[ref.evidence_id].extracted_text)
+        for ref in result.evidence
+        if ref.evidence_id in evidence_by_id
+    )
+    if has_support:
+        return result, False
+
+    downgraded = result.model_copy(
+        update={
+            "verdict": ClaimVerdict.INSUFFICIENT_EVIDENCE,
+            "reason": "Cited evidence shares no content with the claim (conservative overlap check failed)",
+        }
+    )
+    return downgraded, True
 
 
 def _bounded_check(deadline: float, cancellation: CancellationToken) -> Optional[JudgeError]:

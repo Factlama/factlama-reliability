@@ -16,6 +16,7 @@ from judges.providers import (
     JudgeProvider,
     JudgeRequest,
     RuleBasedProvider,
+    apply_citation_support_check,
     validate_judge_result,
 )
 from schemas.citation import Citation
@@ -122,7 +123,7 @@ class Verifier:
 
             claims = self._extract_claims(request.answer)
 
-            claim_verifications, attempts, calibration_class = self._verify_claims(
+            claim_verifications, attempts, calibration_class, judge_citation_violations = self._verify_claims(
                 claims,
                 request.evidence,
             )
@@ -146,6 +147,7 @@ class Verifier:
                 + instruction_violations
                 + scope_violations
                 + citation_violations
+                + judge_citation_violations
                 + tool_violations
             )
 
@@ -274,16 +276,18 @@ class Verifier:
         self,
         claims: list,
         evidence: list[Evidence],
-    ) -> tuple[list[ClaimVerification], list[Attempt], Optional[str]]:
+    ) -> tuple[list[ClaimVerification], list[Attempt], Optional[str], list[Violation]]:
         """Verify all claims against evidence via one bounded JudgeProvider call each.
 
         Returns:
             Tuple of (claim verifications, judge attempts, calibration class
             shared by every attempt -- or None when there were no claims to
-            dispatch at all).
+            dispatch at all -- and violations raised by the judge-boundary
+            citation checks below).
         """
         verifications: list[ClaimVerification] = []
         attempts: list[Attempt] = []
+        citation_violations: list[Violation] = []
         calibration_class: Optional[str] = None
 
         for claim in claims:
@@ -302,8 +306,26 @@ class Verifier:
 
             attempt_started = datetime.now(timezone.utc)
             judge_result = self.model_provider.evaluate(judge_request, deadline, cancellation)
-            judge_result = validate_judge_result(judge_result)
+            # Reject a SUPPORTED verdict citing no evidence ID, or an ID absent
+            # from this request (a hallucinated citation), before trusting it.
+            judge_result = validate_judge_result(judge_result, judge_request)
+            # Then run the conservative, non-model overlap/support check on
+            # whatever real evidence was cited (CONTRACTS.md).
+            judge_result, citation_downgraded = apply_citation_support_check(judge_result, judge_request)
             attempt_completed = datetime.now(timezone.utc)
+
+            if citation_downgraded:
+                citation_violations.append(
+                    Violation(
+                        code="CITATION_MISMATCH",
+                        severity="medium",
+                        claim_id=claim.id,
+                        message=(
+                            "Judge-cited evidence shares no content with the claim; "
+                            "downgraded from SUPPORTED to INSUFFICIENT_EVIDENCE"
+                        ),
+                    )
+                )
 
             if judge_result.error is None:
                 verifications.append(
@@ -352,7 +374,7 @@ class Verifier:
                     )
                 )
 
-        return verifications, attempts, calibration_class
+        return verifications, attempts, calibration_class, citation_violations
 
     def _evaluate_instructions(
         self,

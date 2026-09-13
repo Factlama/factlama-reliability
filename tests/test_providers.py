@@ -13,6 +13,7 @@ from judges.providers import (
     MockModelProvider,
     NLIProvider,
     RuleBasedProvider,
+    apply_citation_support_check,
     validate_judge_result,
 )
 from schemas.claims import Claim, ClaimVerdict, EvidenceReference
@@ -38,8 +39,32 @@ class TestJudgeResultInvariants:
 
     def test_supported_without_evidence_is_downgraded_to_invalid_response(self) -> None:
         """CONTRACTS.md: SUPPORTED without a cited evidence ID is INVALID_RESPONSE."""
+        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        request = JudgeRequest(
+            claim=claim,
+            evidence=[Evidence(id="doc_1", extracted_text="Company X was founded in 2018.")],
+        )
         malformed = JudgeResult(verdict=ClaimVerdict.SUPPORTED, evidence=[])
-        validated = validate_judge_result(malformed)
+        validated = validate_judge_result(malformed, request)
+
+        assert validated.verdict is None
+        assert validated.error is not None
+        assert validated.error.code == JudgeErrorCode.INVALID_RESPONSE
+
+    def test_supported_citing_unknown_evidence_id_is_downgraded_to_invalid_response(self) -> None:
+        """A judge citing an evidence ID that was never part of its request must not be
+        trusted -- citing a nonexistent ID is not a real citation, matching the "without a
+        cited evidence ID" rule in spirit."""
+        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        request = JudgeRequest(
+            claim=claim,
+            evidence=[Evidence(id="doc_1", extracted_text="Company X was founded in 2018.")],
+        )
+        hallucinated = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence=[EvidenceReference(evidence_id="doc_999", support=0.9, relevance=0.9)],
+        )
+        validated = validate_judge_result(hallucinated, request)
 
         assert validated.verdict is None
         assert validated.error is not None
@@ -47,16 +72,89 @@ class TestJudgeResultInvariants:
 
     def test_supported_with_evidence_passes_through(self) -> None:
         """A well-formed SUPPORTED result is not altered."""
+        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        request = JudgeRequest(
+            claim=claim,
+            evidence=[Evidence(id="doc_1", extracted_text="Company X was founded in 2018.")],
+        )
         result = JudgeResult(
             verdict=ClaimVerdict.SUPPORTED,
             evidence=[EvidenceReference(evidence_id="doc_1", support=0.9, relevance=0.9)],
         )
-        assert validate_judge_result(result) is result
+        assert validate_judge_result(result, request) is result
 
     def test_non_supported_verdicts_are_not_affected(self) -> None:
         """The evidence-citation rule is specific to SUPPORTED, not every verdict."""
+        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        request = JudgeRequest(claim=claim, evidence=[])
         result = JudgeResult(verdict=ClaimVerdict.UNSUPPORTED, evidence=[])
-        assert validate_judge_result(result) is result
+        assert validate_judge_result(result, request) is result
+
+
+class TestCitationSupportCheck:
+    """Tests for CONTRACTS.md's conservative, non-model overlap/support check.
+
+    This runs after validate_judge_result() has already rejected a
+    nonexistent evidence ID -- every case here cites real evidence.
+    """
+
+    def test_downgrades_supported_verdict_with_no_shared_content(self) -> None:
+        """A SUPPORTED verdict citing real evidence that is unrelated to the claim must not
+        be trusted as-is."""
+        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        evidence = Evidence(id="doc_1", extracted_text="The weather today is sunny and warm.")
+        request = JudgeRequest(claim=claim, evidence=[evidence])
+        result = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence=[EvidenceReference(evidence_id="doc_1", support=0.9, relevance=0.9)],
+        )
+
+        downgraded, changed = apply_citation_support_check(result, request)
+
+        assert changed is True
+        assert downgraded.verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE
+        assert downgraded.error is None
+
+    def test_passes_through_supported_verdict_with_shared_content(self) -> None:
+        """Matching evidence is left untouched."""
+        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        evidence = Evidence(id="doc_1", extracted_text="Company X was founded in 2018.")
+        request = JudgeRequest(claim=claim, evidence=[evidence])
+        result = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence=[EvidenceReference(evidence_id="doc_1", support=0.9, relevance=0.9)],
+        )
+
+        unchanged, changed = apply_citation_support_check(result, request)
+
+        assert changed is False
+        assert unchanged is result
+
+    def test_does_not_reject_legitimate_paraphrase_with_partial_overlap(self) -> None:
+        """Low but nonzero overlap must not be rejected -- CONTRACTS.md: "legitimate
+        paraphrase is not rejected solely for lacking shared words"."""
+        claim = Claim(id="claim_001", text="The firm began operations in 2018.")
+        evidence = Evidence(id="doc_1", extracted_text="Company X was founded in the year 2018.")
+        request = JudgeRequest(claim=claim, evidence=[evidence])
+        result = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence=[EvidenceReference(evidence_id="doc_1", support=0.9, relevance=0.9)],
+        )
+
+        _, changed = apply_citation_support_check(result, request)
+
+        assert changed is False
+
+    def test_non_supported_verdicts_are_not_affected(self) -> None:
+        """The overlap check is specific to SUPPORTED, not every verdict."""
+        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        request = JudgeRequest(claim=claim, evidence=[])
+        result = JudgeResult(verdict=ClaimVerdict.UNSUPPORTED, evidence=[])
+
+        unchanged, changed = apply_citation_support_check(result, request)
+
+        assert changed is False
+        assert unchanged is result
 
 
 class TestMockModelProvider:
