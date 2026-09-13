@@ -6,18 +6,57 @@ import pytest
 
 from judges.providers import (
     CancellationToken,
+    JudgeError,
     JudgeErrorCode,
     JudgeRequest,
+    JudgeResult,
     MockModelProvider,
     NLIProvider,
     RuleBasedProvider,
+    validate_judge_result,
 )
-from schemas.claims import Claim, ClaimVerdict
+from schemas.claims import Claim, ClaimVerdict, EvidenceReference
 from schemas.evidence import Evidence
 from schemas.instruction import Instruction, InstructionType
 from schemas.policy import Policy, ScopePolicy
 
 FAR_DEADLINE = time.monotonic() + 3600
+
+
+class TestJudgeResultInvariants:
+    """Tests for the JudgeResult port's stated invariants."""
+
+    def test_verdict_and_error_together_is_rejected(self) -> None:
+        """A JudgeResult must never carry both a verdict and an error."""
+        with pytest.raises(ValueError):
+            JudgeResult(verdict=ClaimVerdict.SUPPORTED, error=JudgeError(code=JudgeErrorCode.TIMEOUT, message="x"))
+
+    def test_neither_verdict_nor_error_is_rejected(self) -> None:
+        """A JudgeResult must carry at least one of verdict or error."""
+        with pytest.raises(ValueError):
+            JudgeResult()
+
+    def test_supported_without_evidence_is_downgraded_to_invalid_response(self) -> None:
+        """CONTRACTS.md: SUPPORTED without a cited evidence ID is INVALID_RESPONSE."""
+        malformed = JudgeResult(verdict=ClaimVerdict.SUPPORTED, evidence=[])
+        validated = validate_judge_result(malformed)
+
+        assert validated.verdict is None
+        assert validated.error is not None
+        assert validated.error.code == JudgeErrorCode.INVALID_RESPONSE
+
+    def test_supported_with_evidence_passes_through(self) -> None:
+        """A well-formed SUPPORTED result is not altered."""
+        result = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence=[EvidenceReference(evidence_id="doc_1", support=0.9, relevance=0.9)],
+        )
+        assert validate_judge_result(result) is result
+
+    def test_non_supported_verdicts_are_not_affected(self) -> None:
+        """The evidence-citation rule is specific to SUPPORTED, not every verdict."""
+        result = JudgeResult(verdict=ClaimVerdict.UNSUPPORTED, evidence=[])
+        assert validate_judge_result(result) is result
 
 
 class TestMockModelProvider:

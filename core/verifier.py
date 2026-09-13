@@ -16,6 +16,7 @@ from judges.providers import (
     JudgeProvider,
     JudgeRequest,
     RuleBasedProvider,
+    validate_judge_result,
 )
 from schemas.citation import Citation
 from schemas.claims import ClaimVerdict, ClaimVerification
@@ -301,6 +302,7 @@ class Verifier:
 
             attempt_started = datetime.now(timezone.utc)
             judge_result = self.model_provider.evaluate(judge_request, deadline, cancellation)
+            judge_result = validate_judge_result(judge_result)
             attempt_completed = datetime.now(timezone.utc)
 
             if judge_result.error is None:

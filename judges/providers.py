@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from schemas.claims import Claim, ClaimVerdict, EvidenceReference
 from schemas.evidence import Evidence
@@ -74,6 +74,30 @@ class JudgeResult(BaseModel):
     confidence: Optional[float] = None
     reason: Optional[str] = None
     error: Optional[JudgeError] = None
+
+    @model_validator(mode="after")
+    def validate_verdict_xor_error(self) -> "JudgeResult":
+        """Enforce the port's stated invariant: a verdict, or an error, never both, never neither."""
+        if (self.verdict is None) == (self.error is None):
+            raise ValueError("JudgeResult must set exactly one of verdict or error")
+        return self
+
+
+def validate_judge_result(result: JudgeResult) -> JudgeResult:
+    """Downgrade a malformed judge response to a typed error before it reaches core.
+
+    CONTRACTS.md: "SUPPORTED without a cited evidence ID is INVALID_RESPONSE."
+    A provider must not be trusted to enforce this itself -- it is checked once,
+    here, for every provider's output.
+    """
+    if result.error is None and result.verdict == ClaimVerdict.SUPPORTED and not result.evidence:
+        return JudgeResult(
+            error=JudgeError(
+                code=JudgeErrorCode.INVALID_RESPONSE,
+                message="SUPPORTED verdict returned without any cited evidence ID",
+            )
+        )
+    return result
 
 
 def _bounded_check(deadline: float, cancellation: CancellationToken) -> Optional[JudgeError]:

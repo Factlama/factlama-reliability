@@ -3,7 +3,7 @@
 import pytest
 
 from core import verify
-from judges.providers import MockModelProvider, RuleBasedProvider
+from judges.providers import JudgeProvider, JudgeRequest, JudgeResult, MockModelProvider, RuleBasedProvider
 from core.verifier import Verifier
 from schemas.citation import Citation
 from schemas.claims import ClaimVerdict
@@ -253,6 +253,32 @@ class TestErrorHandling:
         assert "Simulated error" not in str(result.metadata)
         assert len(result.provenance.attempts) == 1
         assert result.provenance.attempts[0].outcome.value == "FAILED"
+
+
+class _MalformedProvider(JudgeProvider):
+    """A judge provider that violates the evidence-citation rule, for testing."""
+
+    @property
+    def name(self) -> str:
+        return "malformed-test-provider"
+
+    def evaluate(self, request: JudgeRequest, deadline: float, cancellation) -> JudgeResult:
+        return JudgeResult(verdict=ClaimVerdict.SUPPORTED, evidence=[])
+
+
+class TestResponseValidation:
+    """Tests that a provider cannot smuggle an unsupported SUPPORTED verdict past the port."""
+
+    def test_supported_without_evidence_downgrades_to_insufficient_evidence(self) -> None:
+        """CONTRACTS.md: SUPPORTED without cited evidence is INVALID_RESPONSE, never trusted as-is."""
+        verifier = Verifier(model_provider=_MalformedProvider())
+        result = verifier.verify(_request(answer="Company X was founded in 2018."))
+
+        assert all(c.verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE for c in result.claims)
+        assert len(result.provenance.attempts) >= 1
+        assert all(a.error == "INVALID_RESPONSE" for a in result.provenance.attempts)
+        # Never UNSUPPORTED/FAIL from an infrastructure/response-validation failure.
+        assert result.verdict != OverallVerdict.FAIL
 
 
 class TestTenantIsolation:
