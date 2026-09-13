@@ -1,0 +1,165 @@
+"""Scoring engine for verification metrics.
+
+Implements Reliability's v0.1 scoring specification (scoring.md): groundedness,
+hallucination_risk and contradiction_risk are claim-ratio ("count(...) /
+count(applicable claims)") measures with no invented partial credit. Every
+other dimension is UNAVAILABLE until an evaluator and method version
+explicitly supply an accepted formula for it -- there is no weighted
+composite "reliability" score in CONTRACTS.md; the aggregate verdict is
+computed independently by `determine_verdict()` from claim verdicts alone.
+"""
+
+import hashlib
+
+from schemas.claims import ClaimVerdict, ClaimVerification
+from schemas.verification import OverallVerdict, ScoreStatus, ScoreValue
+
+NONE_CALIBRATION_CLASS = "NONE"
+
+
+def derive_calibration_class(
+    evaluator_id: str,
+    evaluator_version: str,
+    provider_id: str,
+    pinned_model_id: str,
+    configuration_version: str,
+    qualification_status: str,
+    derivation_version: str = "cc-0.1",
+) -> str:
+    """Derive an opaque, stable calibration class per ADR-010.
+
+    Deterministic: identical inputs always produce the same class, and
+    changing any single input (including qualification_status) changes it.
+    No registry exists yet -- this only computes the identifier, it does not
+    look anything up.
+    """
+    basis = (
+        f"{derivation_version}:{evaluator_id}:{evaluator_version}:{provider_id}:"
+        f"{pinned_model_id}:{configuration_version}:{qualification_status}"
+    )
+    return hashlib.sha256(basis.encode()).hexdigest()[:16]
+
+
+def determine_verdict(claim_verifications: list[ClaimVerification]) -> OverallVerdict:
+    """Determine the factual aggregate verdict from claim verdicts alone.
+
+    Implements scoring.md's precedence exactly. This is independent of any
+    policy action (CONTRACTS.md: "Factual verdict is computed independently
+    of policy action").
+    """
+    applicable = [v for v in claim_verifications if v.verdict != ClaimVerdict.NOT_APPLICABLE]
+
+    if not applicable:
+        return OverallVerdict.ABSTAIN
+    if all(v.verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE for v in applicable):
+        return OverallVerdict.ABSTAIN
+    if any(v.verdict == ClaimVerdict.CONTRADICTED for v in applicable):
+        return OverallVerdict.FAIL
+    if all(v.verdict == ClaimVerdict.SUPPORTED for v in applicable):
+        return OverallVerdict.PASS
+    return OverallVerdict.PARTIAL
+
+
+class ScoringEngine:
+    """Engine for calculating verification score dimensions."""
+
+    VERSION = "0.1"
+
+    def __init__(self, scoring_version: str = VERSION) -> None:
+        """Initialize the scoring engine.
+
+        Args:
+            scoring_version: Version of scoring algorithm to use.
+        """
+        self.scoring_version = scoring_version
+
+    def calculate_scores(
+        self,
+        claim_verifications: list[ClaimVerification],
+        calibration_class: str | None = None,
+        citation_support_score: float | None = None,
+        tool_correctness_score: float | None = None,
+    ) -> dict[str, ScoreValue]:
+        """Calculate all named score dimensions.
+
+        Args:
+            claim_verifications: Verified claims with verdicts.
+            calibration_class: The calibration class of the judge attempt(s)
+                behind these claim verdicts, or None if no judge attempt
+                occurred (e.g. zero claims extracted).
+            citation_support_score: Pre-calculated fraction of valid
+                citations (structural, deterministic), or None if no
+                citations were supplied.
+            tool_correctness_score: Pre-calculated fraction of successful
+                tool executions (structural, deterministic), or None if no
+                tool executions were supplied.
+
+        Returns:
+            Dict of dimension name to ScoreValue.
+        """
+        applicable = [v for v in claim_verifications if v.verdict != ClaimVerdict.NOT_APPLICABLE]
+        claim_class = calibration_class if applicable else NONE_CALIBRATION_CLASS
+
+        scores: dict[str, ScoreValue] = {
+            "groundedness": self._claim_ratio_score(
+                applicable,
+                lambda v: v.verdict == ClaimVerdict.SUPPORTED,
+                "groundedness-0.1",
+                claim_class,
+            ),
+            "hallucination_risk": self._claim_ratio_score(
+                applicable,
+                lambda v: v.verdict in (ClaimVerdict.UNSUPPORTED, ClaimVerdict.CONTRADICTED),
+                "hallucination-risk-0.1",
+                claim_class,
+            ),
+            "contradiction_risk": self._claim_ratio_score(
+                applicable,
+                lambda v: v.verdict == ClaimVerdict.CONTRADICTED,
+                "contradiction-risk-0.1",
+                claim_class,
+            ),
+            "citation_support": self._structural_score(
+                citation_support_score, "citation-support-structural-0.1"
+            ),
+            "tool_correctness": self._structural_score(
+                tool_correctness_score, "tool-correctness-structural-0.1"
+            ),
+            "scope_breach": ScoreValue(status=ScoreStatus.UNAVAILABLE),
+            "instruction_adherence": ScoreValue(status=ScoreStatus.UNAVAILABLE),
+            "confidence_alignment": ScoreValue(status=ScoreStatus.UNAVAILABLE),
+        }
+        return scores
+
+    def _claim_ratio_score(
+        self,
+        applicable: list[ClaimVerification],
+        predicate,
+        method_version: str,
+        calibration_class: str,
+    ) -> ScoreValue:
+        """A count(predicate)/count(applicable) ratio score, or NOT_APPLICABLE when empty."""
+        if not applicable:
+            return ScoreValue(
+                status=ScoreStatus.NOT_APPLICABLE,
+                method_version=method_version,
+                calibration_class=calibration_class,
+            )
+        value = sum(1 for v in applicable if predicate(v)) / len(applicable)
+        return ScoreValue(
+            value=round(value, 4),
+            status=ScoreStatus.MEASURED,
+            method_version=method_version,
+            calibration_class=calibration_class,
+        )
+
+    def _structural_score(self, value: float | None, method_version: str) -> ScoreValue:
+        """A deterministic structural score (no judge involved), or NOT_APPLICABLE when unset."""
+        if value is None:
+            return ScoreValue(status=ScoreStatus.NOT_APPLICABLE, method_version=method_version)
+        return ScoreValue(
+            value=round(value, 4),
+            status=ScoreStatus.MEASURED,
+            method_version=method_version,
+            calibration_class=NONE_CALIBRATION_CLASS,
+        )
