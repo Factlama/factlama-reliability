@@ -5,8 +5,6 @@ Determines only the policy action, never the factual verdict -- that is
 computed independently of policy action").
 """
 
-from typing import Optional
-
 from schemas.policy import Policy, PolicyAction
 from schemas.verification import OverallVerdict, ScoreStatus, ScoreValue, Violation
 
@@ -16,14 +14,13 @@ class PolicyEngine:
 
     def __init__(self) -> None:
         """Initialize the policy engine."""
-        pass
 
     def evaluate(
         self,
         verdict: OverallVerdict,
         scores: dict[str, ScoreValue],
         violations: list[Violation],
-        policy: Optional[Policy] = None,
+        policy: Policy | None = None,
         has_citations: bool = True,
     ) -> tuple[PolicyAction, list[Violation]]:
         """Evaluate scores against policy thresholds and determine the policy action.
@@ -50,13 +47,14 @@ class PolicyEngine:
             policy.grounding.minimum is not None
             and groundedness is not None
             and groundedness.status == ScoreStatus.MEASURED
-            and groundedness.value < policy.grounding.minimum
+            and (groundedness_value := groundedness.value) is not None
+            and groundedness_value < policy.grounding.minimum
         ):
             additional_violations.append(
                 Violation(
                     code="GROUNDING_BELOW_THRESHOLD",
                     severity="high",
-                    message=f"Groundedness {groundedness.value:.2f} below minimum {policy.grounding.minimum:.2f}",
+                    message=f"Groundedness {groundedness_value:.2f} below minimum {policy.grounding.minimum:.2f}",
                 )
             )
 
@@ -65,14 +63,15 @@ class PolicyEngine:
             policy.hallucination.maximum is not None
             and hallucination_risk is not None
             and hallucination_risk.status == ScoreStatus.MEASURED
-            and hallucination_risk.value > policy.hallucination.maximum
+            and (hallucination_risk_value := hallucination_risk.value) is not None
+            and hallucination_risk_value > policy.hallucination.maximum
         ):
             additional_violations.append(
                 Violation(
                     code="HALLUCINATION_ABOVE_THRESHOLD",
                     severity="critical",
                     message=(
-                        f"Hallucination risk {hallucination_risk.value:.2f} above maximum "
+                        f"Hallucination risk {hallucination_risk_value:.2f} above maximum "
                         f"{policy.hallucination.maximum:.2f}"
                     ),
                 )
@@ -83,14 +82,15 @@ class PolicyEngine:
             policy.instructions.minimum is not None
             and instruction_adherence is not None
             and instruction_adherence.status == ScoreStatus.MEASURED
-            and instruction_adherence.value < policy.instructions.minimum
+            and (instruction_adherence_value := instruction_adherence.value) is not None
+            and instruction_adherence_value < policy.instructions.minimum
         ):
             additional_violations.append(
                 Violation(
                     code="INSTRUCTION_VIOLATION",
                     severity="high",
                     message=(
-                        f"Instruction adherence {instruction_adherence.value:.2f} below minimum "
+                        f"Instruction adherence {instruction_adherence_value:.2f} below minimum "
                         f"{policy.instructions.minimum:.2f}"
                     ),
                 )
@@ -101,13 +101,14 @@ class PolicyEngine:
             policy.tools.minimum is not None
             and tool_correctness is not None
             and tool_correctness.status == ScoreStatus.MEASURED
-            and tool_correctness.value < policy.tools.minimum
+            and (tool_correctness_value := tool_correctness.value) is not None
+            and tool_correctness_value < policy.tools.minimum
         ):
             additional_violations.append(
                 Violation(
                     code="TOOL_ERROR",
                     severity="high",
-                    message=f"Tool correctness {tool_correctness.value:.2f} below minimum {policy.tools.minimum:.2f}",
+                    message=f"Tool correctness {tool_correctness_value:.2f} below minimum {policy.tools.minimum:.2f}",
                 )
             )
 
@@ -126,14 +127,15 @@ class PolicyEngine:
             policy.citations.minimum_support is not None
             and citation_support is not None
             and citation_support.status == ScoreStatus.MEASURED
-            and citation_support.value < policy.citations.minimum_support
+            and (citation_support_value := citation_support.value) is not None
+            and citation_support_value < policy.citations.minimum_support
         ):
             additional_violations.append(
                 Violation(
                     code="CITATION_MISMATCH",
                     severity="high",
                     message=(
-                        f"Citation support {citation_support.value:.2f} below minimum "
+                        f"Citation support {citation_support_value:.2f} below minimum "
                         f"{policy.citations.minimum_support:.2f}"
                     ),
                 )
@@ -145,7 +147,9 @@ class PolicyEngine:
         # This can only escalate the *policy action*, not the already-fixed
         # factual verdict.
         all_violations = violations + additional_violations
-        force_fail = policy.tools.fail_on_error and any(v.code == "TOOL_ERROR" for v in all_violations)
+        force_fail = policy.tools.fail_on_error and any(
+            v.code == "TOOL_ERROR" for v in all_violations
+        )
 
         effective_verdict = OverallVerdict.FAIL if force_fail else verdict
         action = self._determine_action(effective_verdict, policy)

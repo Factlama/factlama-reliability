@@ -1,7 +1,5 @@
 """Tests for policy engine."""
 
-import pytest
-
 from core.policy import PolicyEngine
 from schemas.policy import (
     ActionPolicy,
@@ -16,7 +14,9 @@ from schemas.verification import OverallVerdict, ScoreStatus, ScoreValue, Violat
 
 
 def _score(value: float | None, status: ScoreStatus = ScoreStatus.MEASURED) -> ScoreValue:
-    return ScoreValue(value=value, status=status, method_version="test-0.1", calibration_class="NONE")
+    return ScoreValue(
+        value=value, status=status, method_version="test-0.1", calibration_class="NONE"
+    )
 
 
 def _na() -> ScoreValue:
@@ -49,7 +49,7 @@ class TestPolicyEngine:
         """Test evaluation with low groundedness flags a threshold violation."""
         policy = Policy(id="test", grounding=GroundingPolicy(minimum=0.90))
         scores = {"groundedness": _score(0.50)}
-        action, violations = self.engine.evaluate(
+        _action, violations = self.engine.evaluate(
             verdict=OverallVerdict.PARTIAL,
             scores=scores,
             violations=[],
@@ -61,7 +61,7 @@ class TestPolicyEngine:
         """A threshold check must not fire against a NOT_APPLICABLE/UNAVAILABLE score."""
         policy = Policy(id="test", grounding=GroundingPolicy(minimum=0.90))
         scores = {"groundedness": _na()}
-        action, violations = self.engine.evaluate(
+        _action, violations = self.engine.evaluate(
             verdict=OverallVerdict.ABSTAIN,
             scores=scores,
             violations=[],
@@ -73,7 +73,7 @@ class TestPolicyEngine:
         """Test evaluation with high hallucination risk."""
         policy = Policy(id="test", hallucination=HallucinationPolicy(maximum=0.10))
         scores = {"hallucination_risk": _score(0.50)}
-        action, violations = self.engine.evaluate(
+        _action, violations = self.engine.evaluate(
             verdict=OverallVerdict.FAIL,
             scores=scores,
             violations=[],
@@ -118,7 +118,7 @@ class TestPolicyEngine:
     def test_citations_required_but_missing(self) -> None:
         """Test that a policy requiring citations flags their absence."""
         policy = Policy(id="test", citations=CitationPolicy(required=True))
-        action, violations = self.engine.evaluate(
+        _action, violations = self.engine.evaluate(
             verdict=OverallVerdict.PASS,
             scores={},
             violations=[],
@@ -130,7 +130,7 @@ class TestPolicyEngine:
     def test_citations_required_and_present_is_fine(self) -> None:
         """Test that supplying citations satisfies a required-citations policy."""
         policy = Policy(id="test", citations=CitationPolicy(required=True))
-        action, violations = self.engine.evaluate(
+        _action, violations = self.engine.evaluate(
             verdict=OverallVerdict.PASS,
             scores={},
             violations=[],
@@ -143,7 +143,7 @@ class TestPolicyEngine:
         """Test that low citation support against a minimum_support policy is flagged."""
         policy = Policy(id="test", citations=CitationPolicy(minimum_support=0.9))
         scores = {"citation_support": _score(0.5)}
-        action, violations = self.engine.evaluate(
+        _action, violations = self.engine.evaluate(
             verdict=OverallVerdict.PARTIAL,
             scores=scores,
             violations=[],
@@ -180,7 +180,7 @@ class TestPolicyEngine:
 
     def test_default_policy(self) -> None:
         """Test evaluation with default policy."""
-        action, violations = self.engine.evaluate(
+        action, _violations = self.engine.evaluate(
             verdict=OverallVerdict.PASS,
             scores={},
             violations=[],

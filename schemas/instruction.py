@@ -1,7 +1,6 @@
 """Instruction schema models."""
 
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 

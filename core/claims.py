@@ -2,7 +2,6 @@
 
 import re
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from schemas.claims import Claim, ClaimType
 
@@ -121,22 +120,40 @@ class SimpleClaimExtractor(ClaimExtractor):
             The classified claim type.
         """
         # Check for numerical claims
-        if re.search(r"\d+(?:\.\d+)?(?:\s*(?:%|percent|dollars|\$|kg|lbs|miles|km|years?|months?|days?))", sentence, re.IGNORECASE):
+        if re.search(
+            r"\d+(?:\.\d+)?(?:\s*(?:%|percent|dollars|\$|kg|lbs|miles|km|years?|months?|days?))",
+            sentence,
+            re.IGNORECASE,
+        ):
             # Check if it's temporal
-            if re.search(r"\b(in|on|at|during)\s+\d{4}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", sentence):
+            if re.search(
+                r"\b(in|on|at|during)\s+\d{4}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", sentence
+            ):
                 return ClaimType.TEMPORAL
             return ClaimType.NUMERICAL
 
         # Check for temporal claims
-        if re.search(r"\b\d{4}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b", sentence, re.IGNORECASE):
+        if re.search(
+            r"\b\d{4}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b",
+            sentence,
+            re.IGNORECASE,
+        ):
             return ClaimType.TEMPORAL
 
         # Check for comparative claims
-        if re.search(r"\b(more|less|better|worse|larger|smaller|higher|lower|faster|slower)\s+than\b", sentence, re.IGNORECASE):
+        if re.search(
+            r"\b(more|less|better|worse|larger|smaller|higher|lower|faster|slower)\s+than\b",
+            sentence,
+            re.IGNORECASE,
+        ):
             return ClaimType.COMPARATIVE
 
         # Check for causal claims
-        if re.search(r"\b(because|since|therefore|thus|consequently|as a result|caused|led to)\b", sentence, re.IGNORECASE):
+        if re.search(
+            r"\b(because|since|therefore|thus|consequently|as a result|caused|led to)\b",
+            sentence,
+            re.IGNORECASE,
+        ):
             return ClaimType.CAUSAL
 
         # Default to factual
@@ -197,15 +214,25 @@ class EnhancedClaimExtractor(ClaimExtractor):
 
         # Conjunctions that often separate independent claims
         self.claim_conjunctions = [
-            r"\band\b", r"\bbut\b", r"\bhowever\b", r"\byet\b",
-            r"\bmoreover\b", r"\bfurthermore\b", r"\balso\b",
-            r"\bin addition\b", r"\bas well as\b",
+            r"\band\b",
+            r"\bbut\b",
+            r"\bhowever\b",
+            r"\byet\b",
+            r"\bmoreover\b",
+            r"\bfurthermore\b",
+            r"\balso\b",
+            r"\bin addition\b",
+            r"\bas well as\b",
         ]
 
         # Relative clause markers that often embed secondary claims
         self.relative_markers = [
-            r"\bwhich\b", r"\bthat\b", r"\bwho\b", r"\bwhom\b",
-            r"\bwhere\b", r"\bwhen\b",
+            r"\bwhich\b",
+            r"\bthat\b",
+            r"\bwho\b",
+            r"\bwhom\b",
+            r"\bwhere\b",
+            r"\bwhen\b",
         ]
 
         # Appositive markers
@@ -250,7 +277,9 @@ class EnhancedClaimExtractor(ClaimExtractor):
                     continue
 
                 claim_type = self._classify_claim_type(clause)
-                importance = self._calculate_importance(clause, claim_idx, len(clauses) + len(sentences))
+                importance = self._calculate_importance(
+                    clause, claim_idx, len(clauses) + len(sentences)
+                )
 
                 claim = Claim(
                     id=f"claim_{claim_idx + 1:03d}",
@@ -292,7 +321,7 @@ class EnhancedClaimExtractor(ClaimExtractor):
                 # Split at each conjunction
                 last_end = 0
                 for match in matches:
-                    before = clause[last_end:match.start()].strip()
+                    before = clause[last_end : match.start()].strip()
                     if before:
                         new_clauses.append(before)
                     last_end = match.end()
@@ -315,7 +344,7 @@ class EnhancedClaimExtractor(ClaimExtractor):
                     # Split the clause at the relative marker
                     last_end = 0
                     for match in matches:
-                        before = clause[last_end:match.start()].strip()
+                        before = clause[last_end : match.start()].strip()
                         if before:
                             refined_clauses.append(before)
                         last_end = match.end()
@@ -339,18 +368,36 @@ class EnhancedClaimExtractor(ClaimExtractor):
     def _classify_claim_type(self, sentence: str) -> ClaimType:
         """Classify the type of a claim."""
         # Check for numerical claims
-        if re.search(r"\d+(?:\.\d+)?(?:\s*(?:%|percent|dollars|\$|kg|lbs|miles|km|years?|months?|days?))", sentence, re.IGNORECASE):
-            if re.search(r"\b(in|on|at|during)\s+\d{4}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", sentence):
+        if re.search(
+            r"\d+(?:\.\d+)?(?:\s*(?:%|percent|dollars|\$|kg|lbs|miles|km|years?|months?|days?))",
+            sentence,
+            re.IGNORECASE,
+        ):
+            if re.search(
+                r"\b(in|on|at|during)\s+\d{4}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", sentence
+            ):
                 return ClaimType.TEMPORAL
             return ClaimType.NUMERICAL
 
-        if re.search(r"\b\d{4}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b", sentence, re.IGNORECASE):
+        if re.search(
+            r"\b\d{4}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b",
+            sentence,
+            re.IGNORECASE,
+        ):
             return ClaimType.TEMPORAL
 
-        if re.search(r"\b(more|less|better|worse|larger|smaller|higher|lower|faster|slower)\s+than\b", sentence, re.IGNORECASE):
+        if re.search(
+            r"\b(more|less|better|worse|larger|smaller|higher|lower|faster|slower)\s+than\b",
+            sentence,
+            re.IGNORECASE,
+        ):
             return ClaimType.COMPARATIVE
 
-        if re.search(r"\b(because|since|therefore|thus|consequently|as a result|caused|led to)\b", sentence, re.IGNORECASE):
+        if re.search(
+            r"\b(because|since|therefore|thus|consequently|as a result|caused|led to)\b",
+            sentence,
+            re.IGNORECASE,
+        ):
             return ClaimType.CAUSAL
 
         return ClaimType.FACTUAL

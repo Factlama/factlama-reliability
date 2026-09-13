@@ -10,6 +10,7 @@ computed independently by `determine_verdict()` from claim verdicts alone.
 """
 
 import hashlib
+from collections.abc import Callable
 
 from schemas.claims import ClaimVerdict, ClaimVerification
 from schemas.verification import OverallVerdict, ScoreStatus, ScoreValue
@@ -98,7 +99,11 @@ class ScoringEngine:
             Dict of dimension name to ScoreValue.
         """
         applicable = [v for v in claim_verifications if v.verdict != ClaimVerdict.NOT_APPLICABLE]
-        claim_class = calibration_class if applicable else NONE_CALIBRATION_CLASS
+        claim_class: str = (
+            calibration_class
+            if applicable and calibration_class is not None
+            else NONE_CALIBRATION_CLASS
+        )
 
         scores: dict[str, ScoreValue] = {
             "groundedness": self._claim_ratio_score(
@@ -134,7 +139,7 @@ class ScoringEngine:
     def _claim_ratio_score(
         self,
         applicable: list[ClaimVerification],
-        predicate,
+        predicate: Callable[[ClaimVerification], bool],
         method_version: str,
         calibration_class: str,
     ) -> ScoreValue:

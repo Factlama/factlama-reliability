@@ -4,21 +4,21 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any
 
 from core.claims import ClaimExtractor, EnhancedClaimExtractor
 from core.evidence import EvidenceMapper, SimpleEvidenceMapper
 from core.policy import PolicyEngine
 from core.result import VerificationResultBuilder
-from core.scoring import ScoringEngine, determine_verdict, derive_calibration_class
-from judges.providers import (
+from core.scoring import ScoringEngine, derive_calibration_class, determine_verdict
+from judges.port import (
     CancellationToken,
     JudgeProvider,
     JudgeRequest,
-    RuleBasedProvider,
     apply_citation_support_check,
     validate_judge_result,
 )
+from judges.providers import RuleBasedProvider
 from schemas.citation import Citation
 from schemas.claims import ClaimVerdict, ClaimVerification
 from schemas.evidence import Evidence
@@ -72,11 +72,11 @@ class Verifier:
 
     def __init__(
         self,
-        model_provider: Optional[JudgeProvider] = None,
-        claim_extractor: Optional[ClaimExtractor] = None,
-        evidence_mapper: Optional[EvidenceMapper] = None,
-        scoring_engine: Optional[ScoringEngine] = None,
-        policy_engine: Optional[PolicyEngine] = None,
+        model_provider: JudgeProvider | None = None,
+        claim_extractor: ClaimExtractor | None = None,
+        evidence_mapper: EvidenceMapper | None = None,
+        scoring_engine: ScoringEngine | None = None,
+        policy_engine: PolicyEngine | None = None,
     ) -> None:
         """Initialize the verifier.
 
@@ -94,7 +94,9 @@ class Verifier:
         self.scoring_engine = scoring_engine or ScoringEngine()
         self.policy_engine = policy_engine or PolicyEngine()
 
-    def verify(self, request: VerificationRequest, tenant_id: str = "default") -> VerificationResult:
+    def verify(
+        self, request: VerificationRequest, tenant_id: str = "default"
+    ) -> VerificationResult:
         """Execute the full verification pipeline.
 
         Args:
@@ -123,12 +125,16 @@ class Verifier:
 
             claims = self._extract_claims(request.answer)
 
-            claim_verifications, attempts, calibration_class, judge_citation_violations = self._verify_claims(
-                claims,
-                request.evidence,
+            claim_verifications, attempts, calibration_class, judge_citation_violations = (
+                self._verify_claims(
+                    claims,
+                    request.evidence,
+                )
             )
 
-            instruction_violations = self._evaluate_instructions(request.answer, request.instructions)
+            instruction_violations = self._evaluate_instructions(
+                request.answer, request.instructions
+            )
             scope_violations = self._evaluate_scope(request.answer, policy)
             citation_support_score, citation_violations = self._evaluate_citations(
                 request.citations, claim_verifications, request.evidence
@@ -151,7 +157,9 @@ class Verifier:
                 + tool_violations
             )
 
-            status, verdict, abstention_reason = self._determine_status(claims, claim_verifications, attempts)
+            status, verdict, abstention_reason = self._determine_status(
+                claims, claim_verifications, attempts
+            )
 
             policy_action, policy_violations = self.policy_engine.evaluate(
                 verdict=verdict,
@@ -177,8 +185,7 @@ class Verifier:
             )
 
             result = (
-                builder
-                .with_status(status)
+                builder.with_status(status)
                 .with_abstention_reason(abstention_reason)
                 .with_verdict(verdict)
                 .with_scores(scores)
@@ -186,21 +193,25 @@ class Verifier:
                 .with_violations(violations + policy_violations)
                 .with_policy_action(policy_action)
                 .with_provenance(provenance)
-                .with_metadata({
-                    "provider": self.model_provider.name,
-                    "claim_count": len(claims),
-                    "evidence_count": len(request.evidence),
-                    "instruction_count": len(request.instructions),
-                    "citation_count": len(request.citations),
-                    "tool_count": len(request.tool_executions),
-                })
+                .with_metadata(
+                    {
+                        "provider": self.model_provider.name,
+                        "claim_count": len(claims),
+                        "evidence_count": len(request.evidence),
+                        "instruction_count": len(request.instructions),
+                        "citation_count": len(request.citations),
+                        "tool_count": len(request.tool_executions),
+                    }
+                )
                 .build()
             )
 
             return result
 
         except Exception:
-            logger.exception("Unexpected pipeline failure during verification of request %s", request.request_id)
+            logger.exception(
+                "Unexpected pipeline failure during verification of request %s", request.request_id
+            )
             completed_at = datetime.now(timezone.utc)
             failure_attempt = Attempt(
                 attempt_id=f"attempt_{uuid.uuid4().hex[:12]}",
@@ -231,8 +242,7 @@ class Verifier:
                 attempts=[failure_attempt],
             )
             return (
-                builder
-                .with_status(ResultStatus.FAILED)
+                builder.with_status(ResultStatus.FAILED)
                 .with_abstention_reason(AbstentionReason.PROVIDER_FAILURE)
                 .with_verdict(OverallVerdict.ABSTAIN)
                 .with_scores(self.scoring_engine.calculate_scores([], calibration_class=None))
@@ -246,7 +256,7 @@ class Verifier:
         claims: list,
         claim_verifications: list[ClaimVerification],
         attempts: list[Attempt],
-    ) -> tuple[ResultStatus, OverallVerdict, Optional[AbstentionReason]]:
+    ) -> tuple[ResultStatus, OverallVerdict, AbstentionReason | None]:
         """Determine pipeline status, factual verdict, and abstention reason.
 
         The factual verdict itself always comes from `determine_verdict()`
@@ -254,17 +264,31 @@ class Verifier:
         counts as COMPLETED or ABSTAINED and, if abstained, why.
         """
         if not claims:
-            return ResultStatus.ABSTAINED, OverallVerdict.ABSTAIN, AbstentionReason.NO_CHECKABLE_CLAIMS
+            return (
+                ResultStatus.ABSTAINED,
+                OverallVerdict.ABSTAIN,
+                AbstentionReason.NO_CHECKABLE_CLAIMS,
+            )
 
         if attempts and all(a.outcome == AttemptOutcome.FAILED for a in attempts):
             return ResultStatus.ABSTAINED, OverallVerdict.ABSTAIN, AbstentionReason.PROVIDER_FAILURE
 
         verdict = determine_verdict(claim_verifications)
         if verdict == OverallVerdict.ABSTAIN:
-            applicable = [v for v in claim_verifications if v.verdict != ClaimVerdict.NOT_APPLICABLE]
+            applicable = [
+                v for v in claim_verifications if v.verdict != ClaimVerdict.NOT_APPLICABLE
+            ]
             if not applicable:
-                return ResultStatus.ABSTAINED, OverallVerdict.ABSTAIN, AbstentionReason.NO_CHECKABLE_CLAIMS
-            return ResultStatus.ABSTAINED, OverallVerdict.ABSTAIN, AbstentionReason.INSUFFICIENT_EVIDENCE
+                return (
+                    ResultStatus.ABSTAINED,
+                    OverallVerdict.ABSTAIN,
+                    AbstentionReason.NO_CHECKABLE_CLAIMS,
+                )
+            return (
+                ResultStatus.ABSTAINED,
+                OverallVerdict.ABSTAIN,
+                AbstentionReason.INSUFFICIENT_EVIDENCE,
+            )
 
         return ResultStatus.COMPLETED, verdict, None
 
@@ -276,7 +300,7 @@ class Verifier:
         self,
         claims: list,
         evidence: list[Evidence],
-    ) -> tuple[list[ClaimVerification], list[Attempt], Optional[str], list[Violation]]:
+    ) -> tuple[list[ClaimVerification], list[Attempt], str | None, list[Violation]]:
         """Verify all claims against evidence via one bounded JudgeProvider call each.
 
         Returns:
@@ -288,7 +312,7 @@ class Verifier:
         verifications: list[ClaimVerification] = []
         attempts: list[Attempt] = []
         citation_violations: list[Violation] = []
-        calibration_class: Optional[str] = None
+        calibration_class: str | None = None
 
         for claim in claims:
             cancellation = CancellationToken()
@@ -311,7 +335,9 @@ class Verifier:
             judge_result = validate_judge_result(judge_result, judge_request)
             # Then run the conservative, non-model overlap/support check on
             # whatever real evidence was cited (CONTRACTS.md).
-            judge_result, citation_downgraded = apply_citation_support_check(judge_result, judge_request)
+            judge_result, citation_downgraded = apply_citation_support_check(
+                judge_result, judge_request
+            )
             attempt_completed = datetime.now(timezone.utc)
 
             if citation_downgraded:
@@ -332,7 +358,9 @@ class Verifier:
                     ClaimVerification(
                         claim_id=claim.id,
                         verdict=judge_result.verdict,
-                        confidence=judge_result.confidence if judge_result.confidence is not None else 1.0,
+                        confidence=judge_result.confidence
+                        if judge_result.confidence is not None
+                        else 1.0,
                         evidence=judge_result.evidence,
                         reason=judge_result.reason,
                     )
@@ -401,7 +429,8 @@ class Verifier:
                     Violation(
                         code="INSTRUCTION_VIOLATION",
                         severity=_INSTRUCTION_SEVERITY.get(instruction.priority, "medium"),
-                        message=reason or (
+                        message=reason
+                        or (
                             f"Instruction '{instruction.id}' not adequately followed "
                             f"(adherence={score:.2f})"
                         ),
@@ -440,7 +469,7 @@ class Verifier:
         citations: list[Citation],
         claim_verifications: list[ClaimVerification],
         evidence: list[Evidence],
-    ) -> tuple[Optional[float], list[Violation]]:
+    ) -> tuple[float | None, list[Violation]]:
         """Evaluate whether supplied citations actually support their claims.
 
         This is a deterministic structural check (does the cited source exist,
@@ -476,7 +505,9 @@ class Verifier:
                 )
                 continue
 
-            verification = verification_by_claim.get(citation.claim_id) if citation.claim_id else None
+            verification = (
+                verification_by_claim.get(citation.claim_id) if citation.claim_id else None
+            )
             if verification is not None and not any(
                 ref.evidence_id == citation.source_id and ref.support > 0
                 for ref in verification.evidence
@@ -488,8 +519,7 @@ class Verifier:
                         claim_id=citation.claim_id,
                         evidence_id=citation.source_id,
                         message=(
-                            f"Citation '{citation.id}' does not support claim "
-                            f"'{citation.claim_id}'"
+                            f"Citation '{citation.id}' does not support claim '{citation.claim_id}'"
                         ),
                     )
                 )
@@ -502,7 +532,7 @@ class Verifier:
     def _evaluate_tools(
         self,
         tools: list[ToolExecution],
-    ) -> tuple[Optional[float], list[Violation]]:
+    ) -> tuple[float | None, list[Violation]]:
         """Evaluate agent tool usage correctness from execution status.
 
         Deterministic by design: correctness here means "did the tool call
@@ -525,10 +555,11 @@ class Verifier:
                 violations.append(
                     Violation(
                         code="TOOL_ERROR",
-                        severity="high" if tool.status in (ToolStatus.ERROR, ToolStatus.TIMEOUT) else "medium",
-                        message=tool.error_message or (
-                            f"Tool '{tool.tool_name}' finished with status {tool.status.value}"
-                        ),
+                        severity="high"
+                        if tool.status in (ToolStatus.ERROR, ToolStatus.TIMEOUT)
+                        else "medium",
+                        message=tool.error_message
+                        or (f"Tool '{tool.tool_name}' finished with status {tool.status.value}"),
                         metadata={
                             "tool_id": tool.id,
                             "tool_name": tool.tool_name,
@@ -570,7 +601,7 @@ class Verifier:
 
 
 # Default verifier instance
-_default_verifier: Optional[Verifier] = None
+_default_verifier: Verifier | None = None
 
 
 def get_default_verifier() -> Verifier:
@@ -583,13 +614,13 @@ def get_default_verifier() -> Verifier:
 
 def verify(
     answer: str,
-    question: Optional[str] = None,
-    evidence: Optional[list[Evidence]] = None,
-    request_id: Optional[str] = None,
+    question: str | None = None,
+    evidence: list[Evidence] | None = None,
+    request_id: str | None = None,
     tenant_id: str = "default",
     project_id: str = "default-project",
     application_id: str = "default-app",
-    **kwargs,
+    **kwargs: Any,
 ) -> VerificationResult:
     """Convenience function for simple verification.
 

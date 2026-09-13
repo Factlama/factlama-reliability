@@ -1,6 +1,6 @@
 """Telemetry schema models for observability."""
 
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,35 +13,37 @@ class TelemetryData(BaseModel):
     # FactLama metadata
     factlama_version: str = Field(default="0.1", description="FactLama version")
     trace_id: str = Field(..., description="Trace ID for correlation")
-    span_id: Optional[str] = Field(None, description="Span ID within trace")
+    span_id: str | None = Field(None, description="Span ID within trace")
 
     # Service metadata
-    service_name: Optional[str] = Field(None, description="Service name")
-    environment: Optional[str] = Field(None, description="Environment (production, staging, etc.)")
+    service_name: str | None = Field(None, description="Service name")
+    environment: str | None = Field(None, description="Environment (production, staging, etc.)")
 
     # LLM metadata
-    llm_provider: Optional[str] = Field(None, description="LLM provider")
-    llm_model: Optional[str] = Field(None, description="LLM model name")
-    llm_input_tokens: Optional[int] = Field(None, ge=0, description="Input token count")
-    llm_output_tokens: Optional[int] = Field(None, ge=0, description="Output token count")
-    llm_latency_ms: Optional[float] = Field(None, ge=0, description="LLM latency in milliseconds")
+    llm_provider: str | None = Field(None, description="LLM provider")
+    llm_model: str | None = Field(None, description="LLM model name")
+    llm_input_tokens: int | None = Field(None, ge=0, description="Input token count")
+    llm_output_tokens: int | None = Field(None, ge=0, description="Output token count")
+    llm_latency_ms: float | None = Field(None, ge=0, description="LLM latency in milliseconds")
 
     # Verification results
     verdict: str = Field(..., description="Overall verification verdict")
     reliability: float = Field(..., ge=0.0, le=1.0, description="Reliability score")
 
     # Core metrics
-    groundedness: Optional[float] = Field(None, ge=0.0, le=1.0)
-    hallucination_risk: Optional[float] = Field(None, ge=0.0, le=1.0)
-    contradiction_risk: Optional[float] = Field(None, ge=0.0, le=1.0)
-    scope_breach: Optional[float] = Field(None, ge=0.0, le=1.0)
-    citation_support: Optional[float] = Field(None, ge=0.0, le=1.0)
-    instruction_adherence: Optional[float] = Field(None, ge=0.0, le=1.0)
-    tool_correctness: Optional[float] = Field(None, ge=0.0, le=1.0)
-    confidence_alignment: Optional[float] = Field(None, ge=0.0, le=1.0)
+    groundedness: float | None = Field(None, ge=0.0, le=1.0)
+    hallucination_risk: float | None = Field(None, ge=0.0, le=1.0)
+    contradiction_risk: float | None = Field(None, ge=0.0, le=1.0)
+    scope_breach: float | None = Field(None, ge=0.0, le=1.0)
+    citation_support: float | None = Field(None, ge=0.0, le=1.0)
+    instruction_adherence: float | None = Field(None, ge=0.0, le=1.0)
+    tool_correctness: float | None = Field(None, ge=0.0, le=1.0)
+    confidence_alignment: float | None = Field(None, ge=0.0, le=1.0)
 
     # Additional attributes
-    attributes: dict[str, Any] = Field(default_factory=dict, description="Additional telemetry attributes")
+    attributes: dict[str, Any] = Field(
+        default_factory=dict, description="Additional telemetry attributes"
+    )
 
     def to_open_telemetry_attributes(self) -> dict[str, Any]:
         """Convert to OpenTelemetry attribute format."""

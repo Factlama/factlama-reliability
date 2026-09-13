@@ -1,10 +1,9 @@
 """Tests for the main Verifier."""
 
-import pytest
-
 from core import verify
-from judges.providers import JudgeProvider, JudgeRequest, JudgeResult, MockModelProvider, RuleBasedProvider
 from core.verifier import Verifier
+from judges.port import JudgeProvider, JudgeRequest, JudgeResult
+from judges.providers import MockModelProvider, RuleBasedProvider
 from schemas.citation import Citation
 from schemas.claims import ClaimVerdict
 from schemas.evidence import Evidence
@@ -25,13 +24,13 @@ from schemas.verification import OverallVerdict, ResultStatus, ScoreStatus, Veri
 
 def _request(**overrides) -> VerificationRequest:
     """A minimal valid VerificationRequest, project/application defaulted."""
-    kwargs = dict(
-        request_id="req_001",
-        project_id="proj_test",
-        application_id="app_test",
-        question="Question?",
-        answer="Answer.",
-    )
+    kwargs = {
+        "request_id": "req_001",
+        "project_id": "proj_test",
+        "application_id": "app_test",
+        "question": "Question?",
+        "answer": "Answer.",
+    }
     kwargs.update(overrides)
     return VerificationRequest(**kwargs)
 
@@ -85,7 +84,9 @@ class TestVerifier:
         optimistic behavior: a claim-ratio score never invents support.
         """
         verifier = Verifier()
-        request = _request(question="When was Company X founded?", answer="Company X was founded in 2018.")
+        request = _request(
+            question="When was Company X founded?", answer="Company X was founded in 2018."
+        )
         result = verifier.verify(request)
         assert result.verdict == OverallVerdict.ABSTAIN
         assert result.status == ResultStatus.ABSTAINED
@@ -366,7 +367,10 @@ class TestScopeInstructionCitationToolWiring:
     def test_instruction_violation_flags(self) -> None:
         """An unmet instruction raises a violation; instruction_adherence stays UNAVAILABLE."""
         instruction = Instruction(
-            id="inst_json", text="Return JSON only.", type=InstructionType.FORMAT, priority=Priority.HIGH,
+            id="inst_json",
+            text="Return JSON only.",
+            type=InstructionType.FORMAT,
+            priority=Priority.HIGH,
         )
         result = self.verifier.verify(
             _request(
@@ -383,7 +387,9 @@ class TestScopeInstructionCitationToolWiring:
 
     def test_instruction_followed_raises_no_violation(self) -> None:
         """A satisfied instruction should not be flagged."""
-        instruction = Instruction(id="inst_json", text="Return JSON only.", type=InstructionType.FORMAT)
+        instruction = Instruction(
+            id="inst_json", text="Return JSON only.", type=InstructionType.FORMAT
+        )
         result = self.verifier.verify(
             _request(
                 request_id="req_instr_002",
@@ -452,7 +458,12 @@ class TestScopeInstructionCitationToolWiring:
                 question="What is the weather?",
                 answer="The weather is sunny.",
                 tool_executions=[
-                    ToolExecution(id="tool_1", tool_name="weather_api", status=ToolStatus.ERROR, error_message="API timeout")
+                    ToolExecution(
+                        id="tool_1",
+                        tool_name="weather_api",
+                        status=ToolStatus.ERROR,
+                        error_message="API timeout",
+                    )
                 ],
             )
         )
@@ -469,7 +480,9 @@ class TestScopeInstructionCitationToolWiring:
                 request_id="req_tool_003",
                 question="What is the weather?",
                 answer="The weather is sunny.",
-                tool_executions=[ToolExecution(id="tool_1", tool_name="weather_api", status=ToolStatus.ERROR)],
+                tool_executions=[
+                    ToolExecution(id="tool_1", tool_name="weather_api", status=ToolStatus.ERROR)
+                ],
                 policy=policy,
             )
         )
@@ -496,7 +509,9 @@ class TestScopeInstructionCitationToolWiring:
                 request_id="req_tool_002",
                 question="What is the weather?",
                 answer="The weather is sunny.",
-                tool_executions=[ToolExecution(id="tool_1", tool_name="weather_api", status=ToolStatus.SUCCESS)],
+                tool_executions=[
+                    ToolExecution(id="tool_1", tool_name="weather_api", status=ToolStatus.SUCCESS)
+                ],
             )
         )
         assert result.scores["tool_correctness"].value == 1.0
@@ -528,14 +543,16 @@ class TestConflictingEvidence:
 
     def test_claim_verification_with_explicit_conflict(self) -> None:
         """Test explicit conflict in claim verification."""
-        from schemas.claims import Claim, ClaimVerdict, ClaimVerification, EvidenceReference
+        from schemas.claims import ClaimVerdict, ClaimVerification, EvidenceReference
 
         verification = ClaimVerification(
             claim_id="claim_001",
             verdict=ClaimVerdict.CONTRADICTED,
             confidence=0.8,
             evidence=[EvidenceReference(evidence_id="doc_001", support=0.9, relevance=0.95)],
-            conflicting_evidence=[EvidenceReference(evidence_id="doc_002", support=-0.8, relevance=0.9)],
+            conflicting_evidence=[
+                EvidenceReference(evidence_id="doc_002", support=-0.8, relevance=0.9)
+            ],
             reason="Evidence sources conflict",
         )
 

@@ -1,7 +1,7 @@
 """Result builder for verification."""
 
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 from schemas.claims import ClaimVerification
 from schemas.policy import PolicyAction
@@ -26,7 +26,7 @@ class VerificationResultBuilder:
         tenant_id: str,
         project_id: str,
         application_id: str,
-        interaction_id: Optional[str] = None,
+        interaction_id: str | None = None,
     ) -> None:
         """Initialize the result builder.
 
@@ -43,17 +43,17 @@ class VerificationResultBuilder:
         self.project_id = project_id
         self.application_id = application_id
         self.interaction_id = interaction_id
-        self.trace_id: Optional[str] = None
-        self.span_id: Optional[str] = None
+        self.trace_id: str | None = None
+        self.span_id: str | None = None
         self.status: ResultStatus = ResultStatus.COMPLETED
-        self.abstention_reason: Optional[AbstentionReason] = None
+        self.abstention_reason: AbstentionReason | None = None
         self.verdict: OverallVerdict = OverallVerdict.PASS
         self.scores: dict[str, ScoreValue] = {}
         self.claims: list[ClaimVerification] = []
         self.violations: list[Violation] = []
-        self.policy_action: Optional[str] = None
-        self.policy_version: Optional[str] = None
-        self.provenance: Optional[Provenance] = None
+        self.policy_action: str | None = None
+        self.policy_version: str | None = None
+        self.provenance: Provenance | None = None
         self.usage_summary: Usage = Usage()
         self.metadata: dict[str, Any] = {}
 
@@ -61,7 +61,9 @@ class VerificationResultBuilder:
         self.status = status
         return self
 
-    def with_abstention_reason(self, reason: Optional[AbstentionReason]) -> "VerificationResultBuilder":
+    def with_abstention_reason(
+        self, reason: AbstentionReason | None
+    ) -> "VerificationResultBuilder":
         self.abstention_reason = reason
         return self
 
@@ -89,15 +91,15 @@ class VerificationResultBuilder:
         self.metadata.update(metadata)
         return self
 
-    def with_trace_id(self, trace_id: Optional[str]) -> "VerificationResultBuilder":
+    def with_trace_id(self, trace_id: str | None) -> "VerificationResultBuilder":
         self.trace_id = trace_id
         return self
 
-    def with_span_id(self, span_id: Optional[str]) -> "VerificationResultBuilder":
+    def with_span_id(self, span_id: str | None) -> "VerificationResultBuilder":
         self.span_id = span_id
         return self
 
-    def with_policy_version(self, policy_version: Optional[str]) -> "VerificationResultBuilder":
+    def with_policy_version(self, policy_version: str | None) -> "VerificationResultBuilder":
         self.policy_version = policy_version
         return self
 

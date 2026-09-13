@@ -6,11 +6,11 @@ from pydantic import ValidationError
 from schemas import (
     Attempt,
     AttemptOutcome,
+    Citation,
     Claim,
     ClaimType,
-    ClaimVerification,
     ClaimVerdict,
-    Citation,
+    ClaimVerification,
     Evidence,
     EvidenceType,
     Instruction,
@@ -88,7 +88,12 @@ class TestClaim:
 
     def test_claim_creation(self) -> None:
         """Test creating a claim."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.", type=ClaimType.FACTUAL, importance=0.9)
+        claim = Claim(
+            id="claim_001",
+            text="Company X was founded in 2018.",
+            type=ClaimType.FACTUAL,
+            importance=0.9,
+        )
         assert claim.id == "claim_001"
         assert claim.type == ClaimType.FACTUAL
         assert claim.importance == 0.9
@@ -155,7 +160,10 @@ class TestVerificationRequest:
     def test_request_question_is_optional(self) -> None:
         """CONTRACTS.md: question is optional."""
         request = VerificationRequest(
-            request_id="req_001", project_id="proj_001", application_id="app_001", answer="Answer.",
+            request_id="req_001",
+            project_id="proj_001",
+            application_id="app_001",
+            answer="Answer.",
         )
         assert request.question is None
 
@@ -193,17 +201,17 @@ class TestVerificationResult:
     """Tests for VerificationResult model."""
 
     def _base_kwargs(self, **overrides) -> dict:
-        kwargs = dict(
-            evaluation_id="eval_001",
-            request_id="req_001",
-            tenant_id="tenant_test",
-            project_id="proj_001",
-            application_id="app_001",
-            status=ResultStatus.COMPLETED,
-            verdict=OverallVerdict.PASS,
-            scores={"groundedness": ScoreValue(value=0.95, status=ScoreStatus.MEASURED)},
-            provenance=_provenance(),
-        )
+        kwargs = {
+            "evaluation_id": "eval_001",
+            "request_id": "req_001",
+            "tenant_id": "tenant_test",
+            "project_id": "proj_001",
+            "application_id": "app_001",
+            "status": ResultStatus.COMPLETED,
+            "verdict": OverallVerdict.PASS,
+            "scores": {"groundedness": ScoreValue(value=0.95, status=ScoreStatus.MEASURED)},
+            "provenance": _provenance(),
+        }
         kwargs.update(overrides)
         return kwargs
 
@@ -231,7 +239,9 @@ class TestVerificationResult:
     def test_abstained_status_requires_abstain_verdict(self) -> None:
         """FAILED/ABSTAINED must carry verdict=ABSTAIN (CONTRACTS.md)."""
         with pytest.raises(ValidationError, match="requires verdict=ABSTAIN"):
-            VerificationResult(**self._base_kwargs(status=ResultStatus.ABSTAINED, verdict=OverallVerdict.PASS))
+            VerificationResult(
+                **self._base_kwargs(status=ResultStatus.ABSTAINED, verdict=OverallVerdict.PASS)
+            )
 
     def test_abstained_status_requires_abstention_reason(self) -> None:
         with pytest.raises(ValidationError, match="requires an abstention_reason"):
@@ -254,7 +264,9 @@ class TestScoreValue:
     """Tests for the ScoreValue map replacing the old flat-float VerificationScores."""
 
     def test_measured_score(self) -> None:
-        score = ScoreValue(value=0.75, status=ScoreStatus.MEASURED, method_version="groundedness-0.1")
+        score = ScoreValue(
+            value=0.75, status=ScoreStatus.MEASURED, method_version="groundedness-0.1"
+        )
         assert score.value == 0.75
         assert score.status == ScoreStatus.MEASURED
 
@@ -317,7 +329,10 @@ class TestInstruction:
     def test_instruction_creation(self) -> None:
         """Test creating an instruction."""
         instruction = Instruction(
-            id="inst_001", text="Use only the supplied context.", type=InstructionType.GROUNDING, priority=Priority.HIGH,
+            id="inst_001",
+            text="Use only the supplied context.",
+            type=InstructionType.GROUNDING,
+            priority=Priority.HIGH,
         )
         assert instruction.id == "inst_001"
         assert instruction.type == InstructionType.GROUNDING
@@ -371,7 +386,10 @@ class TestViolation:
     def test_violation_creation(self) -> None:
         """Test creating a violation."""
         violation = Violation(
-            code="UNSUPPORTED_CLAIM", severity="medium", claim_id="claim_001", message="Claim is not supported by evidence",
+            code="UNSUPPORTED_CLAIM",
+            severity="medium",
+            claim_id="claim_001",
+            message="Claim is not supported by evidence",
         )
         assert violation.code == "UNSUPPORTED_CLAIM"
         assert violation.severity == "medium"
@@ -383,14 +401,20 @@ class TestTelemetryData:
 
     def test_telemetry_creation(self) -> None:
         """Test creating telemetry data."""
-        telemetry = TelemetryData(trace_id="trace_001", verdict="PASS", reliability=0.95, groundedness=0.98)
+        telemetry = TelemetryData(
+            trace_id="trace_001", verdict="PASS", reliability=0.95, groundedness=0.98
+        )
         assert telemetry.trace_id == "trace_001"
         assert telemetry.verdict == "PASS"
 
     def test_telemetry_to_open_telemetry(self) -> None:
         """Test converting to OpenTelemetry attributes."""
         telemetry = TelemetryData(
-            trace_id="trace_001", service_name="my-service", verdict="PASS", reliability=0.95, groundedness=0.98,
+            trace_id="trace_001",
+            service_name="my-service",
+            verdict="PASS",
+            reliability=0.95,
+            groundedness=0.98,
         )
         attrs = telemetry.to_open_telemetry_attributes()
         assert attrs["factlama.verdict"] == "PASS"

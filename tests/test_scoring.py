@@ -1,9 +1,7 @@
 """Tests for scoring engine."""
 
-import pytest
-
 from core.scoring import ScoringEngine, derive_calibration_class, determine_verdict
-from schemas.claims import ClaimVerification, ClaimVerdict
+from schemas.claims import ClaimVerdict, ClaimVerification
 from schemas.verification import OverallVerdict, ScoreStatus
 
 
@@ -29,8 +27,12 @@ class TestScoringEngine:
     def test_calculate_scores_supported_claims(self) -> None:
         """Test scoring with supported claims."""
         verifications = [
-            ClaimVerification(claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95),
-            ClaimVerification(claim_id="claim_002", verdict=ClaimVerdict.SUPPORTED, confidence=0.90),
+            ClaimVerification(
+                claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95
+            ),
+            ClaimVerification(
+                claim_id="claim_002", verdict=ClaimVerdict.SUPPORTED, confidence=0.90
+            ),
         ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-1")
         assert scores["groundedness"].value == 1.0
@@ -41,8 +43,12 @@ class TestScoringEngine:
     def test_calculate_scores_unsupported_claims(self) -> None:
         """Test scoring with unsupported claims."""
         verifications = [
-            ClaimVerification(claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95),
-            ClaimVerification(claim_id="claim_002", verdict=ClaimVerdict.UNSUPPORTED, confidence=0.90),
+            ClaimVerification(
+                claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95
+            ),
+            ClaimVerification(
+                claim_id="claim_002", verdict=ClaimVerdict.UNSUPPORTED, confidence=0.90
+            ),
         ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-1")
         assert scores["groundedness"].value == 0.5
@@ -52,8 +58,12 @@ class TestScoringEngine:
     def test_calculate_scores_insufficient_evidence_gets_no_partial_credit(self) -> None:
         """scoring.md: INSUFFICIENT_EVIDENCE contributes zero to groundedness, not partial credit."""
         verifications = [
-            ClaimVerification(claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95),
-            ClaimVerification(claim_id="claim_002", verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE, confidence=0.5),
+            ClaimVerification(
+                claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95
+            ),
+            ClaimVerification(
+                claim_id="claim_002", verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE, confidence=0.5
+            ),
         ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-1")
         assert scores["groundedness"].value == 0.5
@@ -61,7 +71,9 @@ class TestScoringEngine:
     def test_calculate_scores_contradicted_claims(self) -> None:
         """Test scoring with contradicted claims."""
         verifications = [
-            ClaimVerification(claim_id="claim_001", verdict=ClaimVerdict.CONTRADICTED, confidence=0.95),
+            ClaimVerification(
+                claim_id="claim_001", verdict=ClaimVerdict.CONTRADICTED, confidence=0.95
+            ),
         ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-1")
         assert scores["groundedness"].value == 0.0
@@ -71,8 +83,12 @@ class TestScoringEngine:
     def test_calculate_scores_not_applicable_claims_are_excluded(self) -> None:
         """NOT_APPLICABLE claims are excluded from the applicable denominator."""
         verifications = [
-            ClaimVerification(claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95),
-            ClaimVerification(claim_id="claim_002", verdict=ClaimVerdict.NOT_APPLICABLE, confidence=1.0),
+            ClaimVerification(
+                claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95
+            ),
+            ClaimVerification(
+                claim_id="claim_002", verdict=ClaimVerdict.NOT_APPLICABLE, confidence=1.0
+            ),
         ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-1")
         assert scores["groundedness"].value == 1.0
@@ -122,14 +138,14 @@ class TestDeriveCalibrationClass:
     """Tests for ADR-010's calibration class derivation."""
 
     def _basis(self, **overrides):
-        base = dict(
-            evaluator_id="reliability-verifier",
-            evaluator_version="0.1",
-            provider_id="rule-based",
-            pinned_model_id="rule-based",
-            configuration_version="0.1",
-            qualification_status="UNQUALIFIED",
-        )
+        base = {
+            "evaluator_id": "reliability-verifier",
+            "evaluator_version": "0.1",
+            "provider_id": "rule-based",
+            "pinned_model_id": "rule-based",
+            "configuration_version": "0.1",
+            "qualification_status": "UNQUALIFIED",
+        }
         base.update(overrides)
         return base
 

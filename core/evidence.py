@@ -1,7 +1,6 @@
 """Evidence mapping module."""
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from schemas.claims import Claim, ClaimVerdict, ClaimVerification, EvidenceReference
 from schemas.evidence import Evidence
@@ -76,7 +75,7 @@ class SimpleEvidenceMapper(EvidenceMapper):
         evidence_refs: list[EvidenceReference] = []
         best_support = 0.0
         best_verdict = ClaimVerdict.UNSUPPORTED
-        best_reason: Optional[str] = None
+        best_reason: str | None = None
 
         for ev in evidence:
             support, relevance = self._calculate_support(claim.text, ev.extracted_text)
@@ -90,8 +89,7 @@ class SimpleEvidenceMapper(EvidenceMapper):
                     )
                 )
 
-                if support > best_support:
-                    best_support = support
+                best_support = max(best_support, support)
 
         # Check for numerical contradictions
         numerical_contradiction = self._check_numerical_contradiction(claim.text, evidence)
@@ -149,10 +147,8 @@ class SimpleEvidenceMapper(EvidenceMapper):
         # If both have same negation status and high overlap, likely supported
         # If different negation status and high overlap, likely contradicted
         if relevance >= self.match_threshold:
-            if has_negation_in_claim != has_negation_in_evidence:
-                support = -relevance  # Contradiction
-            else:
-                support = relevance  # Support
+            # Negative support = contradiction; positive = agreement.
+            support = -relevance if has_negation_in_claim != has_negation_in_evidence else relevance
         else:
             support = 0.0
 

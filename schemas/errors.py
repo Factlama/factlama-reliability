@@ -1,6 +1,6 @@
 """Error classes for FactLama."""
 
-from typing import Any, Optional
+from typing import Any
 
 
 class FactLamaError(Exception):
@@ -9,8 +9,8 @@ class FactLamaError(Exception):
     def __init__(
         self,
         message: str,
-        code: Optional[str] = None,
-        details: Optional[dict[str, Any]] = None,
+        code: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -29,28 +29,28 @@ class FactLamaError(Exception):
 class InvalidVerificationRequestError(FactLamaError):
     """Raised when a verification request is invalid."""
 
-    def __init__(self, message: str, details: Optional[dict[str, Any]] = None) -> None:
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message, code="INVALID_VERIFICATION_REQUEST", details=details)
 
 
 class InvalidEvidenceError(FactLamaError):
     """Raised when evidence is invalid."""
 
-    def __init__(self, message: str, details: Optional[dict[str, Any]] = None) -> None:
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message, code="INVALID_EVIDENCE", details=details)
 
 
 class InvalidPolicyError(FactLamaError):
     """Raised when a policy is invalid."""
 
-    def __init__(self, message: str, details: Optional[dict[str, Any]] = None) -> None:
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message, code="INVALID_POLICY", details=details)
 
 
 class UnsupportedVerificationModeError(FactLamaError):
     """Raised when an unsupported verification mode is requested."""
 
-    def __init__(self, mode: str, details: Optional[dict[str, Any]] = None) -> None:
+    def __init__(self, mode: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(
             f"Unsupported verification mode: {mode}",
             code="UNSUPPORTED_VERIFICATION_MODE",
@@ -61,7 +61,9 @@ class UnsupportedVerificationModeError(FactLamaError):
 class ModelProviderError(FactLamaError):
     """Raised when a model provider encounters an error."""
 
-    def __init__(self, message: str, provider: Optional[str] = None, details: Optional[dict[str, Any]] = None) -> None:
+    def __init__(
+        self, message: str, provider: str | None = None, details: dict[str, Any] | None = None
+    ) -> None:
         details = details or {}
         if provider:
             details["provider"] = provider
@@ -71,7 +73,9 @@ class ModelProviderError(FactLamaError):
 class VerificationTimeoutError(FactLamaError):
     """Raised when verification times out."""
 
-    def __init__(self, timeout_ms: Optional[float] = None, details: Optional[dict[str, Any]] = None) -> None:
+    def __init__(
+        self, timeout_ms: float | None = None, details: dict[str, Any] | None = None
+    ) -> None:
         details = details or {}
         if timeout_ms is not None:
             details["timeout_ms"] = timeout_ms
@@ -85,7 +89,9 @@ class VerificationTimeoutError(FactLamaError):
 class VerificationUnavailableError(FactLamaError):
     """Raised when verification is unavailable."""
 
-    def __init__(self, message: str = "Verification unavailable", details: Optional[dict[str, Any]] = None) -> None:
+    def __init__(
+        self, message: str = "Verification unavailable", details: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(message, code="VERIFICATION_UNAVAILABLE", details=details)
 
 
@@ -96,7 +102,7 @@ class SchemaVersionError(FactLamaError):
         self,
         expected: str,
         actual: str,
-        details: Optional[dict[str, Any]] = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             f"Schema version mismatch: expected {expected}, got {actual}",

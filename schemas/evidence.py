@@ -1,7 +1,7 @@
 """Evidence schema models."""
 
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,11 +25,15 @@ class Locator(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     source_id: str = Field(..., description="ID of the source (e.g., document or chunk id)")
-    page: Optional[int] = Field(None, description="Page number within the source")
-    section: Optional[str] = Field(None, description="Section or heading within the source")
-    start_char: Optional[int] = Field(None, description="Start character offset within the source text")
-    end_char: Optional[int] = Field(None, description="End character offset within the source text")
-    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional locator metadata")
+    page: int | None = Field(None, description="Page number within the source")
+    section: str | None = Field(None, description="Section or heading within the source")
+    start_char: int | None = Field(
+        None, description="Start character offset within the source text"
+    )
+    end_char: int | None = Field(None, description="End character offset within the source text")
+    metadata: dict[str, Any] = Field(
+        default_factory=dict, description="Additional locator metadata"
+    )
 
 
 class Source(BaseModel):
@@ -37,12 +41,12 @@ class Source(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    uri: Optional[str] = Field(None, description="URI of the source (URL, file path, etc.)")
-    title: Optional[str] = Field(None, description="Title of the source")
-    author: Optional[str] = Field(None, description="Author of the source")
-    published_at: Optional[str] = Field(None, description="Publication date/time")
-    version: Optional[str] = Field(None, description="Version of the source (e.g., doc version)")
-    updated_at: Optional[str] = Field(None, description="Last updated date/time of the source")
+    uri: str | None = Field(None, description="URI of the source (URL, file path, etc.)")
+    title: str | None = Field(None, description="Title of the source")
+    author: str | None = Field(None, description="Author of the source")
+    published_at: str | None = Field(None, description="Publication date/time")
+    version: str | None = Field(None, description="Version of the source (e.g., doc version)")
+    updated_at: str | None = Field(None, description="Last updated date/time of the source")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional source metadata")
 
 
@@ -54,8 +58,8 @@ class Evidence(BaseModel):
     id: str = Field(..., description="Unique identifier for this evidence")
     type: EvidenceType = Field(default=EvidenceType.DOCUMENT, description="Type of evidence")
     extracted_text: str = Field(..., description="The text content extracted from the source")
-    source: Optional[Source] = Field(None, description="Source information")
-    locator: Optional[Locator] = Field(None, description="Precise location of this evidence span")
+    source: Source | None = Field(None, description="Source information")
+    locator: Locator | None = Field(None, description="Precise location of this evidence span")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
 
     def __hash__(self) -> int:

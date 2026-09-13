@@ -1,7 +1,7 @@
 """Tool execution schema models."""
 
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,9 +23,11 @@ class ToolExecution(BaseModel):
 
     id: str = Field(..., description="Unique identifier for this tool call")
     tool_name: str = Field(..., description="Name of the tool called")
-    arguments: dict[str, Any] = Field(default_factory=dict, description="Arguments passed to the tool")
-    result: Optional[Any] = Field(None, description="Result returned by the tool")
+    arguments: dict[str, Any] = Field(
+        default_factory=dict, description="Arguments passed to the tool"
+    )
+    result: Any | None = Field(None, description="Result returned by the tool")
     status: ToolStatus = Field(default=ToolStatus.SUCCESS, description="Execution status")
-    latency_ms: Optional[float] = Field(None, description="Execution latency in milliseconds")
-    error_message: Optional[str] = Field(None, description="Error message if status is error")
+    latency_ms: float | None = Field(None, description="Execution latency in milliseconds")
+    error_message: str | None = Field(None, description="Error message if status is error")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")

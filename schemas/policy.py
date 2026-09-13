@@ -1,7 +1,7 @@
 """Policy schema models."""
 
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,14 +22,16 @@ class PolicyAction(str, Enum):
 class GroundingPolicy(BaseModel):
     """Policy for groundedness requirements."""
 
-    minimum: Optional[float] = Field(None, ge=0.0, le=1.0, description="Minimum groundedness score")
-    required: Optional[bool] = Field(None, description="Whether groundedness is required")
+    minimum: float | None = Field(None, ge=0.0, le=1.0, description="Minimum groundedness score")
+    required: bool | None = Field(None, description="Whether groundedness is required")
 
 
 class HallucinationPolicy(BaseModel):
     """Policy for hallucination risk."""
 
-    maximum: Optional[float] = Field(None, ge=0.0, le=1.0, description="Maximum allowed hallucination risk")
+    maximum: float | None = Field(
+        None, ge=0.0, le=1.0, description="Maximum allowed hallucination risk"
+    )
 
 
 class ScopePolicy(BaseModel):
@@ -44,29 +46,39 @@ class CitationPolicy(BaseModel):
     """Policy for citation requirements."""
 
     required: bool = Field(default=False, description="Whether citations are required")
-    minimum_support: Optional[float] = Field(None, ge=0.0, le=1.0, description="Minimum citation support score")
+    minimum_support: float | None = Field(
+        None, ge=0.0, le=1.0, description="Minimum citation support score"
+    )
 
 
 class InstructionPolicy(BaseModel):
     """Policy for instruction adherence."""
 
-    minimum: Optional[float] = Field(None, ge=0.0, le=1.0, description="Minimum adherence score")
+    minimum: float | None = Field(None, ge=0.0, le=1.0, description="Minimum adherence score")
     critical_only: bool = Field(default=False, description="Only evaluate critical instructions")
 
 
 class ToolPolicy(BaseModel):
     """Policy for tool correctness."""
 
-    minimum: Optional[float] = Field(None, ge=0.0, le=1.0, description="Minimum tool correctness score")
+    minimum: float | None = Field(
+        None, ge=0.0, le=1.0, description="Minimum tool correctness score"
+    )
     fail_on_error: bool = Field(default=True, description="Fail if any tool execution errored")
 
 
 class ActionPolicy(BaseModel):
     """Policy for actions on failures."""
 
-    on_failure: PolicyAction = Field(default=PolicyAction.FAIL, description="Action on verification failure")
-    on_partial: PolicyAction = Field(default=PolicyAction.PASS, description="Action on partial verification")
-    on_abstain: PolicyAction = Field(default=PolicyAction.HUMAN_REVIEW, description="Action when abstaining")
+    on_failure: PolicyAction = Field(
+        default=PolicyAction.FAIL, description="Action on verification failure"
+    )
+    on_partial: PolicyAction = Field(
+        default=PolicyAction.PASS, description="Action on partial verification"
+    )
+    on_abstain: PolicyAction = Field(
+        default=PolicyAction.HUMAN_REVIEW, description="Action when abstaining"
+    )
 
 
 class Policy(BaseModel):

@@ -2,12 +2,12 @@
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from schemas.claims import Claim, ClaimVerification
 from schemas.citation import Citation
+from schemas.claims import ClaimVerification
 from schemas.evidence import Evidence
 from schemas.instruction import Instruction
 from schemas.policy import Policy
@@ -73,10 +73,14 @@ class ScoreValue(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    value: Optional[float] = Field(None, ge=0.0, le=1.0, description="Score in [0,1], only set when status is MEASURED")
+    value: float | None = Field(
+        None, ge=0.0, le=1.0, description="Score in [0,1], only set when status is MEASURED"
+    )
     status: ScoreStatus = Field(..., description="MEASURED | NOT_APPLICABLE | UNAVAILABLE")
-    method_version: Optional[str] = Field(None, description="Versioned method that produced this score")
-    calibration_class: Optional[str] = Field(
+    method_version: str | None = Field(
+        None, description="Versioned method that produced this score"
+    )
+    calibration_class: str | None = Field(
         None, description="Opaque calibration class; 'NONE' when no judge attempt backs this score"
     )
 
@@ -102,8 +106,10 @@ class Cost(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     status: str = Field(..., description="MEASURED | UNAVAILABLE")
-    amount: Optional[float] = Field(None, description="Cost amount, only set when status is MEASURED")
-    currency: Optional[str] = Field(None, description="ISO currency code, only set when status is MEASURED")
+    amount: float | None = Field(None, description="Cost amount, only set when status is MEASURED")
+    currency: str | None = Field(
+        None, description="ISO currency code, only set when status is MEASURED"
+    )
 
 
 class Usage(BaseModel):
@@ -111,11 +117,11 @@ class Usage(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    input_tokens: Optional[int] = None
-    output_tokens: Optional[int] = None
-    total_tokens: Optional[int] = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
     cost: Cost = Field(default_factory=lambda: Cost(status="UNAVAILABLE"))
-    latency_ms: Optional[float] = None
+    latency_ms: float | None = None
 
 
 class Attempt(BaseModel):
@@ -125,13 +131,13 @@ class Attempt(BaseModel):
 
     attempt_id: str
     provider_id: str
-    model_id: Optional[str] = None
-    pinned_model_version: Optional[str] = None
+    model_id: str | None = None
+    pinned_model_version: str | None = None
     configuration_version: str
     qualification_status: QualificationStatus
     calibration_class: str
     outcome: AttemptOutcome
-    error: Optional[str] = Field(None, description="JudgeErrorCode value when outcome is FAILED")
+    error: str | None = Field(None, description="JudgeErrorCode value when outcome is FAILED")
     started_at: datetime
     completed_at: datetime
     usage: Usage = Field(default_factory=Usage)
@@ -144,7 +150,7 @@ class Provenance(BaseModel):
 
     evaluator_id: str
     evaluator_version: str
-    policy_version: Optional[str] = None
+    policy_version: str | None = None
     mode: VerificationMode
     routing_profile_version: str
     started_at: datetime
@@ -159,9 +165,9 @@ class Violation(BaseModel):
 
     code: str = Field(..., description="Violation code")
     severity: str = Field(..., description="Severity level: info, low, medium, high, critical")
-    claim_id: Optional[str] = Field(None, description="ID of the related claim")
+    claim_id: str | None = Field(None, description="ID of the related claim")
     message: str = Field(..., description="Human-readable violation message")
-    evidence_id: Optional[str] = Field(None, description="ID of related evidence")
+    evidence_id: str | None = Field(None, description="ID of related evidence")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
 
 
@@ -191,22 +197,40 @@ class VerificationRequest(BaseModel):
 
     schema_version: str = Field(default="0.1", description="Schema version for compatibility")
     request_id: str = Field(..., description="Unique verification request ID")
-    project_id: str = Field(..., description="Client-supplied project ID, authorized within tenant scope")
-    application_id: str = Field(..., description="Client-supplied application ID, authorized within tenant scope")
-    question: Optional[str] = Field(None, description="User task/question")
+    project_id: str = Field(
+        ..., description="Client-supplied project ID, authorized within tenant scope"
+    )
+    application_id: str = Field(
+        ..., description="Client-supplied application ID, authorized within tenant scope"
+    )
+    question: str | None = Field(None, description="User task/question")
     answer: str = Field(..., min_length=1, description="AI-generated answer to verify")
     evidence: list[Evidence] = Field(default_factory=list, description="Available evidence")
-    instructions: list[Instruction] = Field(default_factory=list, description="Applicable instructions")
+    instructions: list[Instruction] = Field(
+        default_factory=list, description="Applicable instructions"
+    )
     citations: list[Citation] = Field(default_factory=list, description="Citations supplied by AI")
-    tool_executions: list[ToolExecution] = Field(default_factory=list, description="Agent tool activity")
-    policy: Optional[Policy] = Field(None, description="Policy for evaluation")
-    policy_id: Optional[str] = Field(None, description="Reference to a registered policy, when not inlined")
-    mode: VerificationMode = Field(default=VerificationMode.STANDARD, description="Verification mode")
-    interaction_id: Optional[str] = Field(None, description="Links this evaluation to a user-visible AI operation")
-    trace_id: Optional[str] = Field(None, description="Incoming OpenTelemetry trace ID, echoed if supplied")
-    span_id: Optional[str] = Field(None, description="Incoming OpenTelemetry span ID, echoed if supplied")
-    model: Optional[str] = Field(None, description="Model that produced the answer being verified")
-    prompt_version: Optional[str] = Field(None, description="Prompt version that produced the answer")
+    tool_executions: list[ToolExecution] = Field(
+        default_factory=list, description="Agent tool activity"
+    )
+    policy: Policy | None = Field(None, description="Policy for evaluation")
+    policy_id: str | None = Field(
+        None, description="Reference to a registered policy, when not inlined"
+    )
+    mode: VerificationMode = Field(
+        default=VerificationMode.STANDARD, description="Verification mode"
+    )
+    interaction_id: str | None = Field(
+        None, description="Links this evaluation to a user-visible AI operation"
+    )
+    trace_id: str | None = Field(
+        None, description="Incoming OpenTelemetry trace ID, echoed if supplied"
+    )
+    span_id: str | None = Field(
+        None, description="Incoming OpenTelemetry span ID, echoed if supplied"
+    )
+    model: str | None = Field(None, description="Model that produced the answer being verified")
+    prompt_version: str | None = Field(None, description="Prompt version that produced the answer")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Application metadata")
 
     @model_validator(mode="after")
@@ -214,7 +238,9 @@ class VerificationRequest(BaseModel):
         """Validate schema version compatibility."""
         supported_versions = ["0.1"]
         if self.schema_version not in supported_versions:
-            raise ValueError(f"Unsupported schema version: {self.schema_version}. Supported: {supported_versions}")
+            raise ValueError(
+                f"Unsupported schema version: {self.schema_version}. Supported: {supported_versions}"
+            )
         return self
 
 
@@ -229,22 +255,34 @@ class VerificationResult(BaseModel):
     tenant_id: str = Field(..., description="Tenant identifier from trusted authenticated context")
     project_id: str = Field(..., description="Echoed from the request")
     application_id: str = Field(..., description="Echoed from the request")
-    interaction_id: Optional[str] = Field(None, description="Echoed from the request")
-    trace_id: Optional[str] = Field(None, description="OpenTelemetry trace ID for correlation")
-    span_id: Optional[str] = Field(None, description="OpenTelemetry span ID for correlation")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Result creation time")
+    interaction_id: str | None = Field(None, description="Echoed from the request")
+    trace_id: str | None = Field(None, description="OpenTelemetry trace ID for correlation")
+    span_id: str | None = Field(None, description="OpenTelemetry span ID for correlation")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc), description="Result creation time"
+    )
     status: ResultStatus = Field(..., description="Pipeline execution status")
-    abstention_reason: Optional[AbstentionReason] = Field(None, description="Required when status is ABSTAINED")
+    abstention_reason: AbstentionReason | None = Field(
+        None, description="Required when status is ABSTAINED"
+    )
     verdict: OverallVerdict = Field(..., description="Overall verification verdict")
-    scores: dict[str, ScoreValue] = Field(default_factory=dict, description="Named score dimensions")
-    claims: list[ClaimVerification] = Field(default_factory=list, description="Individual claim verifications")
+    scores: dict[str, ScoreValue] = Field(
+        default_factory=dict, description="Named score dimensions"
+    )
+    claims: list[ClaimVerification] = Field(
+        default_factory=list, description="Individual claim verifications"
+    )
     violations: list[Violation] = Field(default_factory=list, description="Detected violations")
-    policy_action: Optional[str] = Field(None, description="Recommended action based on policy")
-    policy_version: Optional[str] = Field(None, description="Version of the policy applied")
+    policy_action: str | None = Field(None, description="Recommended action based on policy")
+    policy_version: str | None = Field(None, description="Version of the policy applied")
     scoring_version: str = Field(default="0.1", description="Scoring algorithm version")
     provenance: Provenance = Field(..., description="How this result was produced")
-    usage_summary: Usage = Field(default_factory=Usage, description="Known usage summed across attempts")
-    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional non-sensitive metadata")
+    usage_summary: Usage = Field(
+        default_factory=Usage, description="Known usage summed across attempts"
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict, description="Additional non-sensitive metadata"
+    )
 
     @model_validator(mode="after")
     def validate_abstention_reason(self) -> "VerificationResult":

@@ -21,7 +21,9 @@ result = verify(
 )
 
 print(f"Verdict: {result.verdict}")
-print(f"Groundedness: {result.scores['groundedness'].value:.2f} ({result.scores['groundedness'].status.value})")
+print(
+    f"Groundedness: {result.scores['groundedness'].value:.2f} ({result.scores['groundedness'].status.value})"
+)
 print(f"Hallucination Risk: {result.scores['hallucination_risk'].value:.2f}")
 print()
 

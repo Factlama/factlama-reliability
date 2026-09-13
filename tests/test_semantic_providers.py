@@ -18,7 +18,8 @@ pytest.importorskip("torch")
 pytest.importorskip("transformers")
 pytest.importorskip("sentence_transformers")
 
-from judges.providers import CancellationToken, EmbeddingProvider, JudgeRequest, NLIProvider
+from judges.port import CancellationToken, JudgeRequest
+from judges.vendor_adapters import EmbeddingProvider, NLIProvider
 from schemas.claims import Claim, ClaimVerdict
 from schemas.evidence import Evidence
 from schemas.instruction import Instruction
@@ -49,23 +50,35 @@ class TestEmbeddingProviderReal:
         """Different wording, same meaning, should still match via embeddings
         (this is the whole point of semantic over exact-text matching)."""
         claim = Claim(id="c1", text="Company X was founded in 2018.")
-        evidence = [Evidence(id="doc_001", extracted_text="Company X was established in the year 2018.")]
-        result = embedding_provider.evaluate(JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken())
+        evidence = [
+            Evidence(id="doc_001", extracted_text="Company X was established in the year 2018.")
+        ]
+        result = embedding_provider.evaluate(
+            JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
+        )
         assert result.verdict == ClaimVerdict.SUPPORTED
         assert result.confidence > 0.7
 
     def test_unrelated_claim_is_unsupported(self, embedding_provider: EmbeddingProvider) -> None:
         claim = Claim(id="c2", text="The stock market crashed yesterday.")
-        evidence = [Evidence(id="doc_001", extracted_text="Company X was established in the year 2018.")]
-        result = embedding_provider.evaluate(JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken())
+        evidence = [
+            Evidence(id="doc_001", extracted_text="Company X was established in the year 2018.")
+        ]
+        result = embedding_provider.evaluate(
+            JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
+        )
         assert result.verdict == ClaimVerdict.UNSUPPORTED
 
     def test_no_evidence_is_insufficient(self, embedding_provider: EmbeddingProvider) -> None:
         claim = Claim(id="c3", text="Company X was founded in 2018.")
-        result = embedding_provider.evaluate(JudgeRequest(claim=claim, evidence=[]), FAR_DEADLINE, CancellationToken())
+        result = embedding_provider.evaluate(
+            JudgeRequest(claim=claim, evidence=[]), FAR_DEADLINE, CancellationToken()
+        )
         assert result.verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE
 
-    def test_evaluate_instruction_returns_bounded_score(self, embedding_provider: EmbeddingProvider) -> None:
+    def test_evaluate_instruction_returns_bounded_score(
+        self, embedding_provider: EmbeddingProvider
+    ) -> None:
         instruction = Instruction(id="i1", text="Discuss the company's financial history.")
         score, reason = embedding_provider.evaluate_instruction(
             "Company X was established in 2018 and has grown steadily.", instruction
@@ -73,7 +86,9 @@ class TestEmbeddingProviderReal:
         assert 0.0 <= score <= 1.0
         assert reason
 
-    def test_evaluate_scope_returns_bounded_score(self, embedding_provider: EmbeddingProvider) -> None:
+    def test_evaluate_scope_returns_bounded_score(
+        self, embedding_provider: EmbeddingProvider
+    ) -> None:
         policy = Policy(id="p1", scope=ScopePolicy(enabled=True, forbidden=["cryptocurrency"]))
         breach, domains = embedding_provider.evaluate_scope(
             "You should invest heavily in Bitcoin and other cryptocurrency right now.", policy
@@ -81,7 +96,9 @@ class TestEmbeddingProviderReal:
         assert 0.0 <= breach <= 1.0
         assert isinstance(domains, list)
 
-    def test_evaluate_scope_disabled_short_circuits(self, embedding_provider: EmbeddingProvider) -> None:
+    def test_evaluate_scope_disabled_short_circuits(
+        self, embedding_provider: EmbeddingProvider
+    ) -> None:
         """Scope evaluation should skip model inference entirely when disabled."""
         policy = Policy(id="p1", scope=ScopePolicy(enabled=False, forbidden=["cryptocurrency"]))
         breach, domains = embedding_provider.evaluate_scope("Bitcoin is a cryptocurrency.", policy)
@@ -104,26 +121,40 @@ class TestNLIProviderReal:
 
     def test_entailing_claim_is_supported(self, nli_provider: NLIProvider) -> None:
         claim = Claim(id="c1", text="Company X was founded in 2018.")
-        evidence = [Evidence(id="doc_001", extracted_text="Company X was founded in 2018 in California.")]
-        result = nli_provider.evaluate(JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken())
+        evidence = [
+            Evidence(id="doc_001", extracted_text="Company X was founded in 2018 in California.")
+        ]
+        result = nli_provider.evaluate(
+            JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
+        )
         assert result.verdict == ClaimVerdict.SUPPORTED
         assert result.confidence > 0.9
 
     def test_contradicting_claim_is_contradicted(self, nli_provider: NLIProvider) -> None:
         claim = Claim(id="c2", text="Company X was founded in 2005.")
-        evidence = [Evidence(id="doc_001", extracted_text="Company X was founded in 2018 in California.")]
-        result = nli_provider.evaluate(JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken())
+        evidence = [
+            Evidence(id="doc_001", extracted_text="Company X was founded in 2018 in California.")
+        ]
+        result = nli_provider.evaluate(
+            JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
+        )
         assert result.verdict == ClaimVerdict.CONTRADICTED
         assert result.confidence > 0.9
 
     def test_unrelated_claim_is_neutral(self, nli_provider: NLIProvider) -> None:
         claim = Claim(id="c3", text="Bananas are a good source of potassium.")
-        evidence = [Evidence(id="doc_001", extracted_text="Company X was founded in 2018 in California.")]
-        result = nli_provider.evaluate(JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken())
+        evidence = [
+            Evidence(id="doc_001", extracted_text="Company X was founded in 2018 in California.")
+        ]
+        result = nli_provider.evaluate(
+            JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
+        )
         assert result.verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE
 
     def test_no_evidence_is_insufficient(self, nli_provider: NLIProvider) -> None:
         claim = Claim(id="c4", text="Company X was founded in 2018.")
-        result = nli_provider.evaluate(JudgeRequest(claim=claim, evidence=[]), FAR_DEADLINE, CancellationToken())
+        result = nli_provider.evaluate(
+            JudgeRequest(claim=claim, evidence=[]), FAR_DEADLINE, CancellationToken()
+        )
         assert result.verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE
         assert result.confidence == 0.5

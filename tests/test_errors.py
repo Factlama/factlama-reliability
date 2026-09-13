@@ -1,7 +1,5 @@
 """Tests for error classes."""
 
-import pytest
-
 from schemas.errors import (
     FactLamaError,
     InvalidEvidenceError,
