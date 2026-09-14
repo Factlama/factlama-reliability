@@ -14,8 +14,8 @@ result = verify(
     answer="Company X was founded in 2018.",
     evidence=[
         Evidence(
-            id="doc_001",
-            extracted_text="Company X was founded in 2018.",
+            evidence_id="doc_001",
+            content="Company X was founded in 2018.",
         )
     ],
 )
@@ -37,8 +37,8 @@ result = verify(
     answer="Company X was founded in 2018 by John Smith.",
     evidence=[
         Evidence(
-            id="doc_001",
-            extracted_text="Company X was founded in 2018.",
+            evidence_id="doc_001",
+            content="Company X was founded in 2018.",
         )
     ],
 )
@@ -60,8 +60,8 @@ result = verify(
     answer="Product X weighs 3.4 kg.",
     evidence=[
         Evidence(
-            id="doc_001",
-            extracted_text="Product X weighs 2.4 kg.",
+            evidence_id="doc_001",
+            content="Product X weighs 2.4 kg.",
         )
     ],
 )
@@ -86,8 +86,8 @@ result = verify(
     answer="The company makes widgets.",
     evidence=[
         Evidence(
-            id="doc_001",
-            extracted_text="The company manufactures widgets and gadgets.",
+            evidence_id="doc_001",
+            content="The company manufactures widgets and gadgets.",
         )
     ],
     policy=policy,

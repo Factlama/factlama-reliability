@@ -19,7 +19,13 @@ from schemas.policy import (
     ToolPolicy,
 )
 from schemas.tools import ToolExecution, ToolStatus
-from schemas.verification import OverallVerdict, ResultStatus, ScoreStatus, VerificationRequest
+from schemas.verification import (
+    OverallVerdict,
+    ResultStatus,
+    ScoreStatus,
+    Severity,
+    VerificationRequest,
+)
 
 
 def _request(**overrides) -> VerificationRequest:
@@ -56,7 +62,7 @@ class TestVerifier:
         request = _request(
             question="When was Company X founded?",
             answer="Company X was founded in 2018.",
-            evidence=[Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")],
+            evidence=[Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")],
         )
         result = verifier.verify(request, tenant_id="tenant_test")
         assert result.request_id == "req_001"
@@ -71,7 +77,7 @@ class TestVerifier:
         request = _request(
             question="When was Company X founded?",
             answer="Company X was founded in 2018 by John Smith.",
-            evidence=[Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")],
+            evidence=[Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")],
         )
         result = verifier.verify(request)
         # Should detect partial support (founded in 2018) and unsupported (by John Smith)
@@ -105,7 +111,7 @@ class TestVerifier:
         request = _request(
             question="When was Company X founded?",
             answer="Company X was founded in 2018.",
-            evidence=[Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")],
+            evidence=[Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")],
             policy=policy,
         )
         result = verifier.verify(request)
@@ -139,7 +145,7 @@ class TestVerifyFunction:
         result = verify(
             question="When was Company X founded?",
             answer="Company X was founded in 2018.",
-            evidence=[Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")],
+            evidence=[Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")],
         )
         assert result is not None
         assert result.request_id is not None
@@ -175,7 +181,7 @@ class TestGoldenCases:
                 request_id="golden_001",
                 question="What does Product X weigh?",
                 answer="Product X weighs 2.4 kg.",
-                evidence=[Evidence(id="doc_001", extracted_text="Product X weighs 2.4 kg.")],
+                evidence=[Evidence(evidence_id="doc_001", content="Product X weighs 2.4 kg.")],
             )
         )
         assert result.verdict == OverallVerdict.PASS
@@ -187,7 +193,7 @@ class TestGoldenCases:
                 request_id="golden_002",
                 question="What does Product X weigh?",
                 answer="Product X weighs 2.4 kg and costs $500.",
-                evidence=[Evidence(id="doc_001", extracted_text="Product X weighs 2.4 kg.")],
+                evidence=[Evidence(evidence_id="doc_001", content="Product X weighs 2.4 kg.")],
             )
         )
         assert result.verdict == OverallVerdict.PARTIAL
@@ -199,7 +205,7 @@ class TestGoldenCases:
                 request_id="golden_003",
                 question="What does Product X weigh?",
                 answer="Product X weighs 3.4 kg.",
-                evidence=[Evidence(id="doc_001", extracted_text="Product X weighs 2.4 kg.")],
+                evidence=[Evidence(evidence_id="doc_001", content="Product X weighs 2.4 kg.")],
             )
         )
         assert result.verdict == OverallVerdict.FAIL
@@ -213,7 +219,7 @@ class TestGoldenCases:
                 request_id="golden_004",
                 question="What is the company's future revenue?",
                 answer="Revenue will be $10 billion.",
-                evidence=[Evidence(id="doc_001", extracted_text="Company X makes widgets.")],
+                evidence=[Evidence(evidence_id="doc_001", content="Company X makes widgets.")],
             )
         )
         assert result.verdict == OverallVerdict.PARTIAL
@@ -225,7 +231,9 @@ class TestGoldenCases:
                 request_id="golden_005",
                 question="Tell me about Company X.",
                 answer="Company X was founded in 2018. It has 5000 employees.",
-                evidence=[Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")],
+                evidence=[
+                    Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")
+                ],
             )
         )
         assert result.verdict == OverallVerdict.PARTIAL
@@ -264,7 +272,7 @@ class _MalformedProvider(JudgeProvider):
         return "malformed-test-provider"
 
     def evaluate(self, request: JudgeRequest, deadline: float, cancellation) -> JudgeResult:
-        return JudgeResult(verdict=ClaimVerdict.SUPPORTED, evidence=[])
+        return JudgeResult(verdict=ClaimVerdict.SUPPORTED, evidence_ids=[])
 
 
 class TestResponseValidation:
@@ -309,7 +317,7 @@ class TestTenantIsolation:
                 request_id="req_a",
                 question="What is the revenue?",
                 answer="Revenue is $1M.",
-                evidence=[Evidence(id="doc_a", extracted_text="Revenue is $1M.")],
+                evidence=[Evidence(evidence_id="doc_a", content="Revenue is $1M.")],
             ),
             tenant_id="tenant_a",
         )
@@ -318,7 +326,7 @@ class TestTenantIsolation:
                 request_id="req_b",
                 question="What is the revenue?",
                 answer="Revenue is $2M.",
-                evidence=[Evidence(id="doc_b", extracted_text="Revenue is $2M.")],
+                evidence=[Evidence(evidence_id="doc_b", content="Revenue is $2M.")],
             ),
             tenant_id="tenant_b",
         )
@@ -358,7 +366,9 @@ class TestScopeInstructionCitationToolWiring:
                 request_id="req_scope_002",
                 question="When was Company X founded?",
                 answer="Company X was founded in 2018.",
-                evidence=[Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")],
+                evidence=[
+                    Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")
+                ],
                 policy=policy,
             )
         )
@@ -367,7 +377,7 @@ class TestScopeInstructionCitationToolWiring:
     def test_instruction_violation_flags(self) -> None:
         """An unmet instruction raises a violation; instruction_adherence stays UNAVAILABLE."""
         instruction = Instruction(
-            id="inst_json",
+            instruction_id="inst_json",
             text="Return JSON only.",
             type=InstructionType.FORMAT,
             priority=Priority.HIGH,
@@ -382,13 +392,13 @@ class TestScopeInstructionCitationToolWiring:
         )
         assert result.scores["instruction_adherence"].status == ScoreStatus.UNAVAILABLE
         violation = next(v for v in result.violations if v.code == "INSTRUCTION_VIOLATION")
-        assert violation.severity == "high"
+        assert violation.severity == Severity.HIGH
         assert violation.metadata["instruction_id"] == "inst_json"
 
     def test_instruction_followed_raises_no_violation(self) -> None:
         """A satisfied instruction should not be flagged."""
         instruction = Instruction(
-            id="inst_json", text="Return JSON only.", type=InstructionType.FORMAT
+            instruction_id="inst_json", text="Return JSON only.", type=InstructionType.FORMAT
         )
         result = self.verifier.verify(
             _request(
@@ -407,13 +417,15 @@ class TestScopeInstructionCitationToolWiring:
                 request_id="req_cite_001",
                 question="When was Company X founded?",
                 answer="Company X was founded in 2018.",
-                evidence=[Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")],
-                citations=[Citation(id="cite_1", source_id="doc_999")],
+                evidence=[
+                    Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")
+                ],
+                citations=[Citation(citation_id="cite_1", evidence_id="doc_999")],
             )
         )
         assert result.scores["citation_support"].value < 1.0
         violation = next(v for v in result.violations if v.code == "CITATION_MISMATCH")
-        assert violation.evidence_id == "doc_999"
+        assert violation.evidence_ids == ["doc_999"]
 
     def test_citation_to_real_source_that_does_not_back_the_claim_is_flagged(self) -> None:
         """A citation to a real source that isn't the claim's supporting evidence is invalid."""
@@ -423,15 +435,17 @@ class TestScopeInstructionCitationToolWiring:
                 question="When was Company X founded?",
                 answer="Company X was founded in 2018.",
                 evidence=[
-                    Evidence(id="doc_001", extracted_text="Company X was founded in 2018."),
-                    Evidence(id="doc_002", extracted_text="Company X makes widgets."),
+                    Evidence(evidence_id="doc_001", content="Company X was founded in 2018."),
+                    Evidence(evidence_id="doc_002", content="Company X makes widgets."),
                 ],
-                citations=[Citation(id="cite_1", claim_id="claim_001", source_id="doc_002")],
+                citations=[
+                    Citation(citation_id="cite_1", claim_id="claim_001", evidence_id="doc_002")
+                ],
             )
         )
         assert result.scores["citation_support"].value < 1.0
         violation = next(v for v in result.violations if v.code == "CITATION_MISMATCH")
-        assert violation.claim_id == "claim_001"
+        assert violation.claim_ids == ["claim_001"]
         assert "does not support" in violation.message
 
     def test_citation_to_known_source_is_valid(self) -> None:
@@ -441,8 +455,10 @@ class TestScopeInstructionCitationToolWiring:
                 request_id="req_cite_002",
                 question="When was Company X founded?",
                 answer="Company X was founded in 2018.",
-                evidence=[Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")],
-                citations=[Citation(id="cite_1", source_id="doc_001")],
+                evidence=[
+                    Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")
+                ],
+                citations=[Citation(citation_id="cite_1", evidence_id="doc_001")],
             )
         )
         assert result.scores["citation_support"].value == 1.0
@@ -459,7 +475,7 @@ class TestScopeInstructionCitationToolWiring:
                 answer="The weather is sunny.",
                 tool_executions=[
                     ToolExecution(
-                        id="tool_1",
+                        tool_execution_id="tool_1",
                         tool_name="weather_api",
                         status=ToolStatus.ERROR,
                         error_message="API timeout",
@@ -481,7 +497,9 @@ class TestScopeInstructionCitationToolWiring:
                 question="What is the weather?",
                 answer="The weather is sunny.",
                 tool_executions=[
-                    ToolExecution(id="tool_1", tool_name="weather_api", status=ToolStatus.ERROR)
+                    ToolExecution(
+                        tool_execution_id="tool_1", tool_name="weather_api", status=ToolStatus.ERROR
+                    )
                 ],
                 policy=policy,
             )
@@ -496,7 +514,9 @@ class TestScopeInstructionCitationToolWiring:
                 request_id="req_cite_004",
                 question="When was Company X founded?",
                 answer="Company X was founded in 2018.",
-                evidence=[Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")],
+                evidence=[
+                    Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")
+                ],
                 policy=policy,
             )
         )
@@ -510,7 +530,11 @@ class TestScopeInstructionCitationToolWiring:
                 question="What is the weather?",
                 answer="The weather is sunny.",
                 tool_executions=[
-                    ToolExecution(id="tool_1", tool_name="weather_api", status=ToolStatus.SUCCESS)
+                    ToolExecution(
+                        tool_execution_id="tool_1",
+                        tool_name="weather_api",
+                        status=ToolStatus.SUCCESS,
+                    )
                 ],
             )
         )
@@ -530,33 +554,30 @@ class TestConflictingEvidence:
             question="What is the population?",
             answer="The population is 5 million.",
             evidence=[
-                Evidence(id="doc_001", extracted_text="The population is 5 million."),
-                Evidence(id="doc_002", extracted_text="The population is 7 million."),
+                Evidence(evidence_id="doc_001", content="The population is 5 million."),
+                Evidence(evidence_id="doc_002", content="The population is 7 million."),
             ],
         )
         result = verifier.verify(request)
 
         assert result.verdict in (OverallVerdict.PASS, OverallVerdict.PARTIAL, OverallVerdict.FAIL)
         for claim in result.claims:
-            assert hasattr(claim, "conflicting_evidence")
-            assert isinstance(claim.conflicting_evidence, list)
+            assert isinstance(claim.evidence_ids, list)
 
     def test_claim_verification_with_explicit_conflict(self) -> None:
-        """Test explicit conflict in claim verification."""
-        from schemas.claims import ClaimVerdict, ClaimVerification, EvidenceReference
+        """A CONTRADICTED claim records the contradicting evidence's ID in evidence_ids --
+        contracts/v0.1 has no separate conflicting-evidence list; evidence_ids alone plus
+        the verdict is the claim's full story."""
+        from schemas.claims import ClaimVerdict, ClaimVerification, RationaleCode
 
         verification = ClaimVerification(
             claim_id="claim_001",
             verdict=ClaimVerdict.CONTRADICTED,
             confidence=0.8,
-            evidence=[EvidenceReference(evidence_id="doc_001", support=0.9, relevance=0.95)],
-            conflicting_evidence=[
-                EvidenceReference(evidence_id="doc_002", support=-0.8, relevance=0.9)
-            ],
-            reason="Evidence sources conflict",
+            evidence_ids=["doc_002"],
+            rationale_code=RationaleCode.CONTRADICTION_DETECTED,
+            rationale="Evidence sources conflict",
         )
 
         assert verification.verdict == ClaimVerdict.CONTRADICTED
-        assert len(verification.evidence) == 1
-        assert len(verification.conflicting_evidence) == 1
-        assert verification.conflicting_evidence[0].evidence_id == "doc_002"
+        assert verification.evidence_ids == ["doc_002"]

@@ -1,9 +1,22 @@
 """Evidence mapping module."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
-from schemas.claims import Claim, ClaimVerdict, ClaimVerification, EvidenceReference
+from schemas.claims import Claim, ClaimVerdict, RationaleCode
 from schemas.evidence import Evidence
+
+
+@dataclass(frozen=True)
+class MappingResult:
+    """An `EvidenceMapper`'s judgment for one claim: internal to a JudgeProvider,
+    not a wire type -- a provider translates this into a `JudgeResult`."""
+
+    verdict: ClaimVerdict
+    evidence_ids: list[str]
+    confidence: float
+    rationale_code: RationaleCode
+    reason: str | None
 
 
 class EvidenceMapper(ABC):
@@ -14,15 +27,15 @@ class EvidenceMapper(ABC):
         self,
         claim: Claim,
         evidence: list[Evidence],
-    ) -> ClaimVerification:
-        """Map evidence to a claim and produce verification.
+    ) -> MappingResult:
+        """Map evidence to a claim and produce a verdict.
 
         Args:
             claim: The claim to verify.
             evidence: Available evidence.
 
         Returns:
-            ClaimVerification with verdict and evidence references.
+            MappingResult with verdict and supporting evidence IDs.
         """
         ...
 
@@ -52,7 +65,7 @@ class SimpleEvidenceMapper(EvidenceMapper):
         self,
         claim: Claim,
         evidence: list[Evidence],
-    ) -> ClaimVerification:
+    ) -> MappingResult:
         """Map evidence to a claim using simple text matching.
 
         Args:
@@ -60,66 +73,66 @@ class SimpleEvidenceMapper(EvidenceMapper):
             evidence: Available evidence.
 
         Returns:
-            ClaimVerification with verdict and evidence references.
+            MappingResult with verdict and supporting evidence IDs.
         """
         if not evidence:
-            return ClaimVerification(
-                claim_id=claim.id,
+            return MappingResult(
                 verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE,
+                evidence_ids=[],
                 confidence=0.5,
-                evidence=[],
+                rationale_code=RationaleCode.NO_EVIDENCE_SUPPLIED,
                 reason="No evidence available for verification",
             )
 
-        # Find relevant evidence
-        evidence_refs: list[EvidenceReference] = []
+        # Find relevant evidence: (evidence_id, support, relevance) per match.
+        matches: list[tuple[str, float, float]] = []
         best_support = 0.0
-        best_verdict = ClaimVerdict.UNSUPPORTED
-        best_reason: str | None = None
 
         for ev in evidence:
-            support, relevance = self._calculate_support(claim.text, ev.extracted_text)
+            support, relevance = self._calculate_support(claim.text, ev.content or "")
 
             if relevance >= self.match_threshold:
-                evidence_refs.append(
-                    EvidenceReference(
-                        evidence_id=ev.id,
-                        support=support,
-                        relevance=relevance,
-                    )
-                )
-
+                matches.append((ev.evidence_id, support, relevance))
                 best_support = max(best_support, support)
 
         # Check for numerical contradictions
-        numerical_contradiction = self._check_numerical_contradiction(claim.text, evidence)
-        if numerical_contradiction:
-            best_verdict = ClaimVerdict.CONTRADICTED
-            best_reason = "Numerical values in claim contradict evidence"
+        contradicting_id = self._check_numerical_contradiction(claim.text, evidence)
+        if contradicting_id is not None:
+            verdict = ClaimVerdict.CONTRADICTED
+            evidence_ids = [contradicting_id]
+            rationale_code = RationaleCode.NUMERICAL_CONTRADICTION
+            reason = "Numerical values in claim contradict evidence"
         # Determine verdict based on evidence
-        elif evidence_refs:
+        elif matches:
             if best_support >= self.contradiction_threshold:
-                best_verdict = ClaimVerdict.SUPPORTED
-                best_reason = "Claim is supported by evidence"
+                verdict = ClaimVerdict.SUPPORTED
+                evidence_ids = [eid for eid, support, _ in matches if support >= 0]
+                rationale_code = RationaleCode.PARAPHRASED_SUPPORT
+                reason = "Claim is supported by evidence"
             elif best_support <= -self.contradiction_threshold:
-                best_verdict = ClaimVerdict.CONTRADICTED
-                best_reason = "Claim contradicts evidence"
+                verdict = ClaimVerdict.CONTRADICTED
+                evidence_ids = [eid for eid, support, _ in matches if support < 0]
+                rationale_code = RationaleCode.CONTRADICTION_DETECTED
+                reason = "Claim contradicts evidence"
             else:
-                best_verdict = ClaimVerdict.INSUFFICIENT_EVIDENCE
-                best_reason = "Evidence exists but is insufficient to determine support"
+                verdict = ClaimVerdict.INSUFFICIENT_EVIDENCE
+                evidence_ids = []
+                rationale_code = RationaleCode.AMBIGUOUS_EVIDENCE
+                reason = "Evidence exists but is insufficient to determine support"
         else:
-            best_verdict = ClaimVerdict.UNSUPPORTED
-            best_reason = "No relevant evidence found"
+            verdict = ClaimVerdict.UNSUPPORTED
+            evidence_ids = []
+            rationale_code = RationaleCode.NO_SUPPORT
+            reason = "No relevant evidence found"
 
-        # Calculate confidence based on evidence quality
-        confidence = self._calculate_confidence(evidence_refs, best_verdict)
+        confidence = self._calculate_confidence(matches, verdict)
 
-        return ClaimVerification(
-            claim_id=claim.id,
-            verdict=best_verdict,
+        return MappingResult(
+            verdict=verdict,
+            evidence_ids=evidence_ids,
             confidence=confidence,
-            evidence=evidence_refs,
-            reason=best_reason,
+            rationale_code=rationale_code,
+            reason=reason,
         )
 
     def _calculate_support(self, claim: str, evidence_text: str) -> tuple[float, float]:
@@ -156,13 +169,13 @@ class SimpleEvidenceMapper(EvidenceMapper):
 
     def _calculate_confidence(
         self,
-        evidence_refs: list[EvidenceReference],
+        matches: list[tuple[str, float, float]],
         verdict: ClaimVerdict,
     ) -> float:
         """Calculate confidence in the verdict.
 
         Args:
-            evidence_refs: Evidence references.
+            matches: (evidence_id, support, relevance) tuples.
             verdict: The determined verdict.
 
         Returns:
@@ -172,19 +185,19 @@ class SimpleEvidenceMapper(EvidenceMapper):
             # Low confidence when no evidence found
             return 0.5
 
-        if not evidence_refs:
+        if not matches:
             return 0.5
 
         # Base confidence on the best evidence relevance
-        best_relevance = max(ref.relevance for ref in evidence_refs) if evidence_refs else 0.5
-        best_support = max(abs(ref.support) for ref in evidence_refs) if evidence_refs else 0.5
+        best_relevance = max(relevance for _, _, relevance in matches)
+        best_support = max(abs(support) for _, support, _ in matches)
 
         # Higher relevance and support = higher confidence
         confidence = (best_relevance + best_support) / 2
 
         return min(1.0, max(0.0, confidence))
 
-    def _check_numerical_contradiction(self, claim: str, evidence: list[Evidence]) -> bool:
+    def _check_numerical_contradiction(self, claim: str, evidence: list[Evidence]) -> str | None:
         """Check for numerical contradictions between claim and evidence.
 
         Args:
@@ -192,29 +205,31 @@ class SimpleEvidenceMapper(EvidenceMapper):
             evidence: List of evidence.
 
         Returns:
-            True if numerical contradiction detected.
+            The ID of the first evidence found to numerically contradict the
+            claim, or None if none do.
         """
         import re
 
         # Extract numbers from claim
         claim_numbers = re.findall(r"\d+(?:\.\d+)?", claim)
         if not claim_numbers:
-            return False
+            return None
 
         for ev in evidence:
+            ev_text = ev.content or ""
             # Extract numbers from evidence
-            evidence_numbers = re.findall(r"\d+(?:\.\d+)?", ev.extracted_text)
+            evidence_numbers = re.findall(r"\d+(?:\.\d+)?", ev_text)
             if not evidence_numbers:
                 continue
 
             # Check if there's high text similarity but different numbers
             claim_words = set(claim.lower().split())
-            ev_words = set(ev.extracted_text.lower().split())
+            ev_words = set(ev_text.lower().split())
             overlap = claim_words & ev_words
             similarity = len(overlap) / len(claim_words) if claim_words else 0.0
 
             # If texts are similar (> 60% word overlap) but numbers differ, it's a contradiction
             if similarity > 0.6 and claim_numbers != evidence_numbers:
-                return True
+                return ev.evidence_id
 
-        return False
+        return None

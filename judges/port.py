@@ -20,10 +20,11 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from schemas.claims import Claim, ClaimVerdict, EvidenceReference
+from schemas.claims import Claim, ClaimVerdict, RationaleCode
 from schemas.evidence import Evidence
 from schemas.instruction import Instruction
 from schemas.policy import Policy
+from schemas.verification import Usage
 
 
 class JudgeErrorCode(str, Enum):
@@ -76,9 +77,11 @@ class JudgeResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     verdict: ClaimVerdict | None = None
-    evidence: list[EvidenceReference] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
     confidence: float | None = None
+    rationale_code: RationaleCode | None = None
     reason: str | None = None
+    usage: Usage | None = None
     error: JudgeError | None = None
 
     @model_validator(mode="after")
@@ -102,10 +105,8 @@ def validate_judge_result(result: JudgeResult, request: JudgeRequest) -> JudgeRe
     if result.error is not None or result.verdict != ClaimVerdict.SUPPORTED:
         return result
 
-    valid_evidence_ids = {e.id for e in request.evidence}
-    if not result.evidence or any(
-        ref.evidence_id not in valid_evidence_ids for ref in result.evidence
-    ):
+    valid_evidence_ids = {e.evidence_id for e in request.evidence}
+    if not result.evidence_ids or any(eid not in valid_evidence_ids for eid in result.evidence_ids):
         return JudgeResult(
             error=JudgeError(
                 code=JudgeErrorCode.INVALID_RESPONSE,
@@ -180,11 +181,11 @@ def apply_citation_support_check(
     if not claim_words:
         return result, False
 
-    evidence_by_id = {e.id: e for e in request.evidence}
+    evidence_by_id = {e.evidence_id: e for e in request.evidence}
     has_support = any(
-        claim_words & _content_words(evidence_by_id[ref.evidence_id].extracted_text)
-        for ref in result.evidence
-        if ref.evidence_id in evidence_by_id
+        claim_words & _content_words(evidence_by_id[eid].content or "")
+        for eid in result.evidence_ids
+        if eid in evidence_by_id
     )
     if has_support:
         return result, False
@@ -192,6 +193,7 @@ def apply_citation_support_check(
     downgraded = result.model_copy(
         update={
             "verdict": ClaimVerdict.INSUFFICIENT_EVIDENCE,
+            "rationale_code": RationaleCode.CITATION_UNSUPPORTED,
             "reason": "Cited evidence shares no content with the claim (conservative overlap check failed)",
         }
     )

@@ -1,7 +1,15 @@
 """FactLama schemas - Verification contracts and data models."""
 
 from schemas.citation import Citation, Locator
-from schemas.claims import Claim, ClaimType, ClaimVerdict, ClaimVerification
+from schemas.claims import (
+    Claim,
+    ClaimType,
+    ClaimVerdict,
+    ClaimVerification,
+    ContributingJudgment,
+    RationaleCode,
+    TextStatus,
+)
 from schemas.errors import (
     FactLamaError,
     InvalidEvidenceError,
@@ -17,18 +25,21 @@ from schemas.evidence import Evidence, EvidenceType, Source
 from schemas.instruction import Instruction, InstructionType, Priority
 from schemas.policy import Policy, PolicyAction
 from schemas.telemetry import TelemetryData
+from schemas.tenancy import TenantContext
 from schemas.tools import ToolExecution, ToolStatus
 from schemas.verification import (
     AbstentionReason,
     Attempt,
     AttemptOutcome,
     Cost,
+    DisputeReason,
     OverallVerdict,
     Provenance,
     QualificationStatus,
     ResultStatus,
     ScoreStatus,
     ScoreValue,
+    Severity,
     Usage,
     VerificationMode,
     VerificationRequest,
@@ -47,7 +58,9 @@ __all__ = [
     "ClaimType",
     "ClaimVerdict",
     "ClaimVerification",
+    "ContributingJudgment",
     "Cost",
+    "DisputeReason",
     # Evidence
     "Evidence",
     "EvidenceType",
@@ -68,13 +81,17 @@ __all__ = [
     "Priority",
     "Provenance",
     "QualificationStatus",
+    "RationaleCode",
     "ResultStatus",
     "SchemaVersionError",
     "ScoreStatus",
     "ScoreValue",
+    "Severity",
     "Source",
     # Telemetry
     "TelemetryData",
+    "TenantContext",
+    "TextStatus",
     # Tools
     "ToolExecution",
     "ToolStatus",

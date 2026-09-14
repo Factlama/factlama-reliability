@@ -20,7 +20,7 @@ from judges.port import (
     JudgeResult,
     bounded_check,
 )
-from schemas.claims import ClaimVerdict, EvidenceReference
+from schemas.claims import ClaimVerdict, RationaleCode
 from schemas.instruction import Instruction
 from schemas.policy import Policy
 
@@ -93,7 +93,7 @@ class EmbeddingProvider(JudgeProvider):
             return JudgeResult(
                 verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE,
                 confidence=0.5,
-                evidence=[],
+                rationale_code=RationaleCode.NO_EVIDENCE_SUPPLIED,
                 reason="No evidence provided",
             )
 
@@ -105,13 +105,15 @@ class EmbeddingProvider(JudgeProvider):
         # Encode the claim
         claim_embedding = model.encode(claim.text, convert_to_tensor=True)
 
-        evidence_refs: list[EvidenceReference] = []
+        # (evidence_id, support, relevance) per candidate match.
+        matches: list[tuple[str, float, float]] = []
         best_similarity = 0.0
         best_evidence = None
 
         for ev in evidence:
+            ev_text = ev.content or ""
             # Encode evidence text
-            evidence_embedding = model.encode(ev.extracted_text, convert_to_tensor=True)
+            evidence_embedding = model.encode(ev_text, convert_to_tensor=True)
 
             # Compute cosine similarity
             import torch.nn.functional as F
@@ -121,27 +123,13 @@ class EmbeddingProvider(JudgeProvider):
             ).item()
 
             # Also check for numerical contradiction
-            has_numerical_contradiction = self._check_numerical_contradiction(
-                claim.text, ev.extracted_text
-            )
+            has_numerical_contradiction = self._check_numerical_contradiction(claim.text, ev_text)
 
             if has_numerical_contradiction and similarity > self.support_threshold:
                 # High semantic similarity but numerical contradiction
-                evidence_refs.append(
-                    EvidenceReference(
-                        evidence_id=ev.id,
-                        support=-similarity,  # Negative support = contradiction
-                        relevance=similarity,
-                    )
-                )
+                matches.append((ev.evidence_id, -similarity, similarity))
             elif similarity >= self.support_threshold:
-                evidence_refs.append(
-                    EvidenceReference(
-                        evidence_id=ev.id,
-                        support=similarity,
-                        relevance=similarity,
-                    )
-                )
+                matches.append((ev.evidence_id, similarity, similarity))
 
             if similarity > best_similarity:
                 best_similarity = similarity
@@ -150,37 +138,48 @@ class EmbeddingProvider(JudgeProvider):
         # Determine verdict
         if (
             best_evidence is not None
-            and self._check_numerical_contradiction(claim.text, best_evidence.extracted_text)
+            and self._check_numerical_contradiction(claim.text, best_evidence.content or "")
             and best_similarity > self.support_threshold
         ):
             verdict = ClaimVerdict.CONTRADICTED
+            evidence_ids = [best_evidence.evidence_id]
+            rationale_code = RationaleCode.NUMERICAL_CONTRADICTION
             reason = "Semantic similarity but numerical contradiction detected"
-        elif evidence_refs:
-            best_support = max(ref.support for ref in evidence_refs)
+        elif matches:
+            best_support = max(support for _, support, _ in matches)
             if best_support >= self.support_threshold:
                 verdict = ClaimVerdict.SUPPORTED
+                evidence_ids = [eid for eid, support, _ in matches if support >= 0]
+                rationale_code = RationaleCode.PARAPHRASED_SUPPORT
                 reason = (
                     f"Claim semantically supported by evidence (similarity: {best_support:.2f})"
                 )
             elif best_support <= -self.contradiction_threshold:
                 verdict = ClaimVerdict.CONTRADICTED
+                evidence_ids = [eid for eid, support, _ in matches if support < 0]
+                rationale_code = RationaleCode.NUMERICAL_CONTRADICTION
                 reason = f"Claim contradicted by evidence (similarity: {abs(best_support):.2f})"
             else:
                 verdict = ClaimVerdict.INSUFFICIENT_EVIDENCE
+                evidence_ids = []
+                rationale_code = RationaleCode.AMBIGUOUS_EVIDENCE
                 reason = (
                     f"Evidence exists but similarity below threshold (best: {best_support:.2f})"
                 )
         else:
             verdict = ClaimVerdict.UNSUPPORTED
+            evidence_ids = []
+            rationale_code = RationaleCode.NO_SUPPORT
             reason = "No semantically relevant evidence found"
 
         # Calculate confidence based on similarity
-        confidence = self._calculate_confidence(evidence_refs, verdict)
+        confidence = self._calculate_confidence(matches, verdict)
 
         return JudgeResult(
             verdict=verdict,
             confidence=confidence,
-            evidence=evidence_refs,
+            evidence_ids=evidence_ids,
+            rationale_code=rationale_code,
             reason=reason,
         )
 
@@ -205,18 +204,18 @@ class EmbeddingProvider(JudgeProvider):
 
     def _calculate_confidence(
         self,
-        evidence_refs: list[EvidenceReference],
+        matches: list[tuple[str, float, float]],
         verdict: ClaimVerdict,
     ) -> float:
         """Calculate confidence in the verdict based on embedding similarity."""
         if verdict == ClaimVerdict.UNSUPPORTED:
             return 0.5
 
-        if not evidence_refs:
+        if not matches:
             return 0.5
 
-        best_relevance = max(ref.relevance for ref in evidence_refs)
-        best_support = max(abs(ref.support) for ref in evidence_refs)
+        best_relevance = max(relevance for _, _, relevance in matches)
+        best_support = max(abs(support) for _, support, _ in matches)
 
         confidence = (best_relevance + best_support) / 2
         return min(1.0, max(0.0, confidence))
@@ -392,7 +391,7 @@ class NLIProvider(JudgeProvider):
             return JudgeResult(
                 verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE,
                 confidence=0.5,
-                evidence=[],
+                rationale_code=RationaleCode.NO_EVIDENCE_SUPPLIED,
                 reason="No evidence provided",
             )
 
@@ -407,14 +406,12 @@ class NLIProvider(JudgeProvider):
 
         import torch
 
-        evidence_refs: list[EvidenceReference] = []
-        entailment_scores = []
-        contradiction_scores = []
-        neutral_scores = []
+        # (evidence_id, entailment_score, contradiction_score, neutral_score) per item.
+        per_evidence: list[tuple[str, float, float, float]] = []
 
         for ev in evidence:
             # Prepare premise (evidence) and hypothesis (claim) for NLI
-            premise = ev.extracted_text
+            premise = ev.content or ""
             hypothesis = claim.text
 
             inputs = tokenizer(
@@ -435,57 +432,41 @@ class NLIProvider(JudgeProvider):
                 neutral_score = probs[label_indices["neutral"]].item()
                 contradiction_score = probs[label_indices["contradiction"]].item()
 
-                entailment_scores.append(entailment_score)
-                contradiction_scores.append(contradiction_score)
-                neutral_scores.append(neutral_score)
-
-                # Determine support based on NLI labels
-                if entailment_score > 0.5:
-                    evidence_refs.append(
-                        EvidenceReference(
-                            evidence_id=ev.id,
-                            support=entailment_score,
-                            relevance=entailment_score,
-                        )
-                    )
-                elif contradiction_score > 0.5:
-                    evidence_refs.append(
-                        EvidenceReference(
-                            evidence_id=ev.id,
-                            support=-contradiction_score,
-                            relevance=contradiction_score,
-                        )
-                    )
-                else:
-                    evidence_refs.append(
-                        EvidenceReference(
-                            evidence_id=ev.id,
-                            support=0.0,
-                            relevance=neutral_score,
-                        )
-                    )
+                per_evidence.append(
+                    (ev.evidence_id, entailment_score, contradiction_score, neutral_score)
+                )
 
         # Aggregate scores
+        entailment_scores = [e for _, e, _, _ in per_evidence]
+        contradiction_scores = [c for _, _, c, _ in per_evidence]
+        neutral_scores = [n for _, _, _, n in per_evidence]
         max_entailment = max(entailment_scores) if entailment_scores else 0.0
         max_contradiction = max(contradiction_scores) if contradiction_scores else 0.0
 
         if max_entailment > 0.5:
             verdict = ClaimVerdict.SUPPORTED
+            evidence_ids = [eid for eid, e, _, _ in per_evidence if e > 0.5]
+            rationale_code = RationaleCode.DIRECT_SUPPORT
             reason = f"Evidence entails claim (entailment: {max_entailment:.2f})"
             confidence = max_entailment
         elif max_contradiction > 0.5:
             verdict = ClaimVerdict.CONTRADICTED
+            evidence_ids = [eid for eid, _, c, _ in per_evidence if c > 0.5]
+            rationale_code = RationaleCode.CONTRADICTION_DETECTED
             reason = f"Evidence contradicts claim (contradiction: {max_contradiction:.2f})"
             confidence = max_contradiction
         else:
             verdict = ClaimVerdict.INSUFFICIENT_EVIDENCE
+            evidence_ids = []
+            rationale_code = RationaleCode.AMBIGUOUS_EVIDENCE
             reason = f"NLI classification neutral (entailment: {max_entailment:.2f}, contradiction: {max_contradiction:.2f})"
             confidence = max(neutral_scores) if neutral_scores else 0.5
 
         return JudgeResult(
             verdict=verdict,
             confidence=confidence,
-            evidence=evidence_refs,
+            evidence_ids=evidence_ids,
+            rationale_code=rationale_code,
             reason=reason,
         )
 

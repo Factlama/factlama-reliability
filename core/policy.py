@@ -6,7 +6,7 @@ computed independently of policy action").
 """
 
 from schemas.policy import Policy, PolicyAction
-from schemas.verification import OverallVerdict, ScoreStatus, ScoreValue, Violation
+from schemas.verification import OverallVerdict, ScoreStatus, ScoreValue, Severity, Violation
 
 
 class PolicyEngine:
@@ -53,7 +53,7 @@ class PolicyEngine:
             additional_violations.append(
                 Violation(
                     code="GROUNDING_BELOW_THRESHOLD",
-                    severity="high",
+                    severity=Severity.HIGH,
                     message=f"Groundedness {groundedness_value:.2f} below minimum {policy.grounding.minimum:.2f}",
                 )
             )
@@ -69,7 +69,7 @@ class PolicyEngine:
             additional_violations.append(
                 Violation(
                     code="HALLUCINATION_ABOVE_THRESHOLD",
-                    severity="critical",
+                    severity=Severity.CRITICAL,
                     message=(
                         f"Hallucination risk {hallucination_risk_value:.2f} above maximum "
                         f"{policy.hallucination.maximum:.2f}"
@@ -88,7 +88,7 @@ class PolicyEngine:
             additional_violations.append(
                 Violation(
                     code="INSTRUCTION_VIOLATION",
-                    severity="high",
+                    severity=Severity.HIGH,
                     message=(
                         f"Instruction adherence {instruction_adherence_value:.2f} below minimum "
                         f"{policy.instructions.minimum:.2f}"
@@ -107,7 +107,7 @@ class PolicyEngine:
             additional_violations.append(
                 Violation(
                     code="TOOL_ERROR",
-                    severity="high",
+                    severity=Severity.HIGH,
                     message=f"Tool correctness {tool_correctness_value:.2f} below minimum {policy.tools.minimum:.2f}",
                 )
             )
@@ -117,7 +117,7 @@ class PolicyEngine:
             additional_violations.append(
                 Violation(
                     code="CITATION_MISMATCH",
-                    severity="high",
+                    severity=Severity.HIGH,
                     message="Citations are required by policy but none were supplied",
                 )
             )
@@ -133,7 +133,7 @@ class PolicyEngine:
             additional_violations.append(
                 Violation(
                     code="CITATION_MISMATCH",
-                    severity="high",
+                    severity=Severity.HIGH,
                     message=(
                         f"Citation support {citation_support_value:.2f} below minimum "
                         f"{policy.citations.minimum_support:.2f}"

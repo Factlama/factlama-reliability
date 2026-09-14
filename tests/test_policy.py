@@ -10,7 +10,7 @@ from schemas.policy import (
     PolicyAction,
     ToolPolicy,
 )
-from schemas.verification import OverallVerdict, ScoreStatus, ScoreValue, Violation
+from schemas.verification import OverallVerdict, ScoreStatus, ScoreValue, Severity, Violation
 
 
 def _score(value: float | None, status: ScoreStatus = ScoreStatus.MEASURED) -> ScoreValue:
@@ -84,7 +84,7 @@ class TestPolicyEngine:
     def test_evaluate_does_not_recompute_verdict_from_violations(self) -> None:
         """The passed-in factual verdict is authoritative; policy no longer upgrades it."""
         existing_violation = Violation(
-            code="UNSUPPORTED_CLAIM", severity="medium", message="Unsupported claim found"
+            code="UNSUPPORTED_CLAIM", severity=Severity.MEDIUM, message="Unsupported claim found"
         )
         action, _ = self.engine.evaluate(
             verdict=OverallVerdict.PARTIAL,
@@ -155,7 +155,9 @@ class TestPolicyEngine:
         """Any tool error forces the on_failure action when fail_on_error is on (the default),
         without touching the passed-in factual verdict."""
         tool_error_violation = Violation(
-            code="TOOL_ERROR", severity="high", message="Tool 'search' finished with status error"
+            code="TOOL_ERROR",
+            severity=Severity.HIGH,
+            message="Tool 'search' finished with status error",
         )
         action, _ = self.engine.evaluate(
             verdict=OverallVerdict.ABSTAIN,
@@ -168,7 +170,9 @@ class TestPolicyEngine:
         """fail_on_error=False lets a single tool error stay non-fatal to the action."""
         policy = Policy(id="test", tools=ToolPolicy(fail_on_error=False))
         tool_error_violation = Violation(
-            code="TOOL_ERROR", severity="high", message="Tool 'search' finished with status error"
+            code="TOOL_ERROR",
+            severity=Severity.HIGH,
+            message="Tool 'search' finished with status error",
         )
         action, _ = self.engine.evaluate(
             verdict=OverallVerdict.PARTIAL,

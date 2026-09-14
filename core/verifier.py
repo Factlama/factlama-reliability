@@ -20,7 +20,13 @@ from judges.port import (
 )
 from judges.providers import RuleBasedProvider
 from schemas.citation import Citation
-from schemas.claims import ClaimVerdict, ClaimVerification
+from schemas.claims import (
+    ClaimVerdict,
+    ClaimVerification,
+    ContributingJudgment,
+    RationaleCode,
+    TextStatus,
+)
 from schemas.evidence import Evidence
 from schemas.instruction import Instruction, Priority
 from schemas.policy import Policy
@@ -33,6 +39,7 @@ from schemas.verification import (
     Provenance,
     QualificationStatus,
     ResultStatus,
+    Severity,
     VerificationRequest,
     VerificationResult,
     Violation,
@@ -41,10 +48,10 @@ from schemas.verification import (
 logger = logging.getLogger(__name__)
 
 _INSTRUCTION_SEVERITY = {
-    Priority.CRITICAL: "critical",
-    Priority.HIGH: "high",
-    Priority.MEDIUM: "medium",
-    Priority.LOW: "low",
+    Priority.CRITICAL: Severity.CRITICAL,
+    Priority.HIGH: Severity.HIGH,
+    Priority.MEDIUM: Severity.MEDIUM,
+    Priority.LOW: Severity.LOW,
 }
 
 # Below this adherence score, an instruction is considered violated.
@@ -340,12 +347,15 @@ class Verifier:
             )
             attempt_completed = datetime.now(timezone.utc)
 
+            attempt_id = f"attempt_{uuid.uuid4().hex[:12]}"
+
             if citation_downgraded:
                 citation_violations.append(
                     Violation(
                         code="CITATION_MISMATCH",
-                        severity="medium",
-                        claim_id=claim.id,
+                        severity=Severity.MEDIUM,
+                        claim_ids=[claim.claim_id],
+                        evidence_ids=judge_result.evidence_ids,
                         message=(
                             "Judge-cited evidence shares no content with the claim; "
                             "downgraded from SUPPORTED to INSUFFICIENT_EVIDENCE"
@@ -354,20 +364,34 @@ class Verifier:
                 )
 
             if judge_result.error is None:
+                verdict = judge_result.verdict
+                assert verdict is not None  # verdict-xor-error invariant
+                rationale_code = judge_result.rationale_code or RationaleCode.NO_SUPPORT
                 verifications.append(
                     ClaimVerification(
-                        claim_id=claim.id,
-                        verdict=judge_result.verdict,
+                        claim_id=claim.claim_id,
+                        verdict=verdict,
+                        evidence_ids=judge_result.evidence_ids,
+                        rationale_code=rationale_code,
+                        rationale=judge_result.reason,
+                        text_status=TextStatus.AVAILABLE,
+                        text=claim.text,
+                        contributing_judgments=[
+                            ContributingJudgment(
+                                attempt_id=attempt_id,
+                                verdict=verdict,
+                                evidence_ids=judge_result.evidence_ids,
+                                rationale_code=rationale_code,
+                            )
+                        ],
                         confidence=judge_result.confidence
                         if judge_result.confidence is not None
                         else 1.0,
-                        evidence=judge_result.evidence,
-                        reason=judge_result.reason,
                     )
                 )
                 attempts.append(
                     Attempt(
-                        attempt_id=f"attempt_{uuid.uuid4().hex[:12]}",
+                        attempt_id=attempt_id,
                         provider_id=self.model_provider.name,
                         configuration_version=judge_request.configuration_version,
                         qualification_status=QualificationStatus.UNQUALIFIED,
@@ -381,16 +405,27 @@ class Verifier:
                 # Provider/dispatch failure is never a factual UNSUPPORTED/FAIL.
                 verifications.append(
                     ClaimVerification(
-                        claim_id=claim.id,
+                        claim_id=claim.claim_id,
                         verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE,
+                        evidence_ids=[],
+                        rationale_code=RationaleCode.PROVIDER_DISPATCH_FAILED,
+                        rationale=f"Judge dispatch failed: {judge_result.error.code.value}",
+                        text_status=TextStatus.AVAILABLE,
+                        text=claim.text,
+                        contributing_judgments=[
+                            ContributingJudgment(
+                                attempt_id=attempt_id,
+                                verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE,
+                                evidence_ids=[],
+                                rationale_code=RationaleCode.PROVIDER_DISPATCH_FAILED,
+                            )
+                        ],
                         confidence=0.0,
-                        evidence=[],
-                        reason=f"Judge dispatch failed: {judge_result.error.code.value}",
                     )
                 )
                 attempts.append(
                     Attempt(
-                        attempt_id=f"attempt_{uuid.uuid4().hex[:12]}",
+                        attempt_id=attempt_id,
                         provider_id=self.model_provider.name,
                         configuration_version=judge_request.configuration_version,
                         qualification_status=QualificationStatus.UNQUALIFIED,
@@ -428,13 +463,16 @@ class Verifier:
                 violations.append(
                     Violation(
                         code="INSTRUCTION_VIOLATION",
-                        severity=_INSTRUCTION_SEVERITY.get(instruction.priority, "medium"),
+                        severity=_INSTRUCTION_SEVERITY.get(instruction.priority, Severity.MEDIUM),
                         message=reason
                         or (
-                            f"Instruction '{instruction.id}' not adequately followed "
+                            f"Instruction '{instruction.instruction_id}' not adequately followed "
                             f"(adherence={score:.2f})"
                         ),
-                        metadata={"instruction_id": instruction.id, "adherence_score": score},
+                        metadata={
+                            "instruction_id": instruction.instruction_id,
+                            "adherence_score": score,
+                        },
                     )
                 )
 
@@ -458,7 +496,7 @@ class Verifier:
         return [
             Violation(
                 code="SCOPE_BREACH",
-                severity="high",
+                severity=Severity.HIGH,
                 message=f"Answer breaches defined scope: {', '.join(breach_domains)}",
                 metadata={"domains": breach_domains},
             )
@@ -483,23 +521,25 @@ class Verifier:
         if not citations:
             return None, []
 
-        evidence_ids = {e.id for e in evidence}
+        evidence_ids = {e.evidence_id for e in evidence}
         verification_by_claim = {v.claim_id: v for v in claim_verifications}
 
         valid = 0
         violations: list[Violation] = []
 
         for citation in citations:
-            if citation.source_id not in evidence_ids:
+            claim_ids = [citation.claim_id] if citation.claim_id else []
+
+            if citation.evidence_id not in evidence_ids:
                 violations.append(
                     Violation(
                         code="CITATION_MISMATCH",
-                        severity="medium",
-                        claim_id=citation.claim_id,
-                        evidence_id=citation.source_id,
+                        severity=Severity.MEDIUM,
+                        claim_ids=claim_ids,
+                        evidence_ids=[citation.evidence_id],
                         message=(
-                            f"Citation '{citation.id}' references unknown source "
-                            f"'{citation.source_id}'"
+                            f"Citation '{citation.citation_id}' references unknown source "
+                            f"'{citation.evidence_id}'"
                         ),
                     )
                 )
@@ -508,18 +548,19 @@ class Verifier:
             verification = (
                 verification_by_claim.get(citation.claim_id) if citation.claim_id else None
             )
-            if verification is not None and not any(
-                ref.evidence_id == citation.source_id and ref.support > 0
-                for ref in verification.evidence
+            if verification is not None and not (
+                citation.evidence_id in verification.evidence_ids
+                and verification.verdict == ClaimVerdict.SUPPORTED
             ):
                 violations.append(
                     Violation(
                         code="CITATION_MISMATCH",
-                        severity="medium",
-                        claim_id=citation.claim_id,
-                        evidence_id=citation.source_id,
+                        severity=Severity.MEDIUM,
+                        claim_ids=claim_ids,
+                        evidence_ids=[citation.evidence_id],
                         message=(
-                            f"Citation '{citation.id}' does not support claim '{citation.claim_id}'"
+                            f"Citation '{citation.citation_id}' does not support claim "
+                            f"'{citation.claim_id}'"
                         ),
                     )
                 )
@@ -555,13 +596,13 @@ class Verifier:
                 violations.append(
                     Violation(
                         code="TOOL_ERROR",
-                        severity="high"
+                        severity=Severity.HIGH
                         if tool.status in (ToolStatus.ERROR, ToolStatus.TIMEOUT)
-                        else "medium",
+                        else Severity.MEDIUM,
                         message=tool.error_message
                         or (f"Tool '{tool.tool_name}' finished with status {tool.status.value}"),
                         metadata={
-                            "tool_id": tool.id,
+                            "tool_id": tool.tool_execution_id,
                             "tool_name": tool.tool_name,
                             "status": tool.status.value,
                         },
@@ -582,8 +623,8 @@ class Verifier:
                 violations.append(
                     Violation(
                         code="UNSUPPORTED_CLAIM",
-                        severity="medium",
-                        claim_id=v.claim_id,
+                        severity=Severity.MEDIUM,
+                        claim_ids=[v.claim_id],
                         message="Claim is not supported by supplied evidence",
                     )
                 )
@@ -591,8 +632,8 @@ class Verifier:
                 violations.append(
                     Violation(
                         code="CONTRADICTED_CLAIM",
-                        severity="critical",
-                        claim_id=v.claim_id,
+                        severity=Severity.CRITICAL,
+                        claim_ids=[v.claim_id],
                         message="Claim contradicts the evidence",
                     )
                 )
@@ -651,8 +692,8 @@ def verify(
             answer="Company X was founded in 2018.",
             evidence=[
                 Evidence(
-                    id="doc_001",
-                    extracted_text="Company X was founded in 2018.",
+                    evidence_id="doc_001",
+                    content="Company X was founded in 2018.",
                 )
             ]
         )

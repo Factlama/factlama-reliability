@@ -10,6 +10,7 @@ from core.exceptions import (
     ScoringError,
 )
 from core.policy import PolicyEngine
+from core.repository import TenantAwareRepository
 from core.result import VerificationResultBuilder
 from core.scoring import ScoringEngine, derive_calibration_class, determine_verdict
 from core.verifier import Verifier, verify
@@ -33,6 +34,7 @@ __all__ = [
     # Engines
     "ScoringEngine",
     "ScoringError",
+    "TenantAwareRepository",
     "VerificationResultBuilder",
     "Verifier",
     "derive_calibration_class",

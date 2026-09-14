@@ -19,12 +19,12 @@ class InstructionType(str, Enum):
 
 
 class Priority(str, Enum):
-    """Priority levels for instructions."""
+    """Priority levels for instructions (contracts/v0.1's uppercase wire values)."""
 
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
 
 
 class Instruction(BaseModel):
@@ -32,7 +32,7 @@ class Instruction(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    id: str = Field(..., description="Unique identifier for this instruction")
+    instruction_id: str = Field(..., description="Unique identifier for this instruction")
     text: str = Field(..., description="The instruction text")
     priority: Priority = Field(default=Priority.MEDIUM, description="Priority level")
     type: InstructionType = Field(default=InstructionType.CUSTOM, description="Instruction type")

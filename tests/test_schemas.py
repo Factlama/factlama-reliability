@@ -32,7 +32,8 @@ from schemas import (
     VerificationResult,
     Violation,
 )
-from schemas.verification import AbstentionReason, VerificationMode
+from schemas.claims import RationaleCode
+from schemas.verification import AbstentionReason, Severity, VerificationMode
 
 
 def _provenance() -> Provenance:
@@ -52,35 +53,48 @@ class TestEvidence:
     def test_evidence_creation(self) -> None:
         """Test creating a basic evidence object."""
         evidence = Evidence(
-            id="doc_001",
+            evidence_id="doc_001",
             type=EvidenceType.DOCUMENT,
-            extracted_text="Company X was founded in 2018.",
+            content="Company X was founded in 2018.",
         )
-        assert evidence.id == "doc_001"
+        assert evidence.evidence_id == "doc_001"
         assert evidence.type == EvidenceType.DOCUMENT
-        assert evidence.extracted_text == "Company X was founded in 2018."
+        assert evidence.content == "Company X was founded in 2018."
 
     def test_evidence_with_source(self) -> None:
         """Test evidence with source information."""
         source = Source(uri="https://example.com/doc", title="Company History", author="John Doe")
-        evidence = Evidence(id="doc_001", extracted_text="Some text", source=source)
+        evidence = Evidence(evidence_id="doc_001", content="Some text", source=source)
         assert evidence.source is not None
         assert evidence.source.uri == "https://example.com/doc"
         assert evidence.source.title == "Company History"
 
     def test_evidence_default_type(self) -> None:
         """Test that default evidence type is DOCUMENT."""
-        evidence = Evidence(id="doc_001", extracted_text="Some text")
+        evidence = Evidence(evidence_id="doc_001", content="Some text")
         assert evidence.type == EvidenceType.DOCUMENT
 
     def test_evidence_hash(self) -> None:
-        """Test that evidence is hashable by id."""
-        ev1 = Evidence(id="doc_001", extracted_text="Text 1")
-        ev2 = Evidence(id="doc_001", extracted_text="Text 2")
-        ev3 = Evidence(id="doc_002", extracted_text="Text 1")
+        """Test that evidence is hashable by evidence_id."""
+        ev1 = Evidence(evidence_id="doc_001", content="Text 1")
+        ev2 = Evidence(evidence_id="doc_001", content="Text 2")
+        ev3 = Evidence(evidence_id="doc_002", content="Text 1")
 
         assert hash(ev1) == hash(ev2)
         assert hash(ev1) != hash(ev3)
+
+    def test_evidence_requires_exactly_one_of_content_or_reference(self) -> None:
+        """contracts/v0.1's oneOf: content and reference are mutually exclusive and required."""
+        with pytest.raises(ValidationError):
+            Evidence(evidence_id="doc_001")
+        with pytest.raises(ValidationError):
+            Evidence(evidence_id="doc_001", content="text", reference={"uri": "s3://x"})
+
+    def test_evidence_with_reference_only(self) -> None:
+        """A pointer without inline content is valid (e.g. after redaction)."""
+        evidence = Evidence(evidence_id="doc_001", reference={"uri": "s3://bucket/doc"})
+        assert evidence.content is None
+        assert evidence.reference == {"uri": "s3://bucket/doc"}
 
 
 class TestClaim:
@@ -89,26 +103,26 @@ class TestClaim:
     def test_claim_creation(self) -> None:
         """Test creating a claim."""
         claim = Claim(
-            id="claim_001",
+            claim_id="claim_001",
             text="Company X was founded in 2018.",
             type=ClaimType.FACTUAL,
             importance=0.9,
         )
-        assert claim.id == "claim_001"
+        assert claim.claim_id == "claim_001"
         assert claim.type == ClaimType.FACTUAL
         assert claim.importance == 0.9
 
     def test_claim_default_importance(self) -> None:
         """Test default claim importance."""
-        claim = Claim(id="claim_001", text="Some claim")
+        claim = Claim(claim_id="claim_001", text="Some claim")
         assert claim.importance == 1.0
 
     def test_claim_importance_validation(self) -> None:
         """Test that importance must be between 0 and 1."""
         with pytest.raises(ValidationError):
-            Claim(id="claim_001", text="Claim", importance=1.5)
+            Claim(claim_id="claim_001", text="Claim", importance=1.5)
         with pytest.raises(ValidationError):
-            Claim(id="claim_001", text="Claim", importance=-0.1)
+            Claim(claim_id="claim_001", text="Claim", importance=-0.1)
 
 
 class TestClaimVerification:
@@ -120,23 +134,33 @@ class TestClaimVerification:
             claim_id="claim_001",
             verdict=ClaimVerdict.SUPPORTED,
             confidence=0.95,
-            reason="Claim is supported by evidence",
+            rationale_code=RationaleCode.DIRECT_SUPPORT,
+            rationale="Claim is supported by evidence",
+            evidence_ids=["doc_1"],
         )
         assert verification.claim_id == "claim_001"
         assert verification.verdict == ClaimVerdict.SUPPORTED
         assert verification.confidence == 0.95
 
     def test_claim_verification_with_evidence(self) -> None:
-        """Test claim verification with evidence references."""
-        from schemas.claims import EvidenceReference
-
+        """Test claim verification with evidence IDs."""
         verification = ClaimVerification(
             claim_id="claim_001",
             verdict=ClaimVerdict.SUPPORTED,
-            evidence=[EvidenceReference(evidence_id="doc_001", support=0.9, relevance=0.95)],
+            evidence_ids=["doc_001"],
+            rationale_code=RationaleCode.DIRECT_SUPPORT,
         )
-        assert len(verification.evidence) == 1
-        assert verification.evidence[0].evidence_id == "doc_001"
+        assert verification.evidence_ids == ["doc_001"]
+
+    def test_supported_without_evidence_ids_is_rejected(self) -> None:
+        """contracts/v0.1: SUPPORTED requires at least one evidence_id."""
+        with pytest.raises(ValidationError, match="requires at least one evidence_id"):
+            ClaimVerification(
+                claim_id="claim_001",
+                verdict=ClaimVerdict.SUPPORTED,
+                evidence_ids=[],
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+            )
 
 
 class TestVerificationRequest:
@@ -171,9 +195,20 @@ class TestVerificationRequest:
         """Tenant identity must never be a client-supplied request field."""
         assert "tenant_id" not in VerificationRequest.model_fields
 
+    def test_request_rejects_client_supplied_tenant_id(self) -> None:
+        """A tenant_id in the payload is rejected outright, not silently dropped."""
+        with pytest.raises(ValidationError, match="must not carry tenant_id"):
+            VerificationRequest(
+                request_id="req_001",
+                project_id="proj_001",
+                application_id="app_001",
+                answer="Answer.",
+                tenant_id="t-acme",
+            )
+
     def test_request_with_evidence(self) -> None:
         """Test request with evidence."""
-        evidence = Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")
+        evidence = Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")
         request = VerificationRequest(
             request_id="req_001",
             project_id="proj_001",
@@ -183,7 +218,7 @@ class TestVerificationRequest:
             evidence=[evidence],
         )
         assert len(request.evidence) == 1
-        assert request.evidence[0].id == "doc_001"
+        assert request.evidence[0].evidence_id == "doc_001"
 
     def test_request_schema_version_validation(self) -> None:
         """Test that unsupported schema versions are rejected."""
@@ -329,12 +364,12 @@ class TestInstruction:
     def test_instruction_creation(self) -> None:
         """Test creating an instruction."""
         instruction = Instruction(
-            id="inst_001",
+            instruction_id="inst_001",
             text="Use only the supplied context.",
             type=InstructionType.GROUNDING,
             priority=Priority.HIGH,
         )
-        assert instruction.id == "inst_001"
+        assert instruction.instruction_id == "inst_001"
         assert instruction.type == InstructionType.GROUNDING
         assert instruction.priority == Priority.HIGH
 
@@ -345,9 +380,9 @@ class TestCitation:
     def test_citation_creation(self) -> None:
         """Test creating a citation."""
         locator = Locator(page=5, section="Introduction")
-        citation = Citation(id="cite_001", source_id="doc_001", locator=locator)
-        assert citation.id == "cite_001"
-        assert citation.source_id == "doc_001"
+        citation = Citation(citation_id="cite_001", evidence_id="doc_001", locator=locator)
+        assert citation.citation_id == "cite_001"
+        assert citation.evidence_id == "doc_001"
         assert citation.locator is not None
         assert citation.locator.page == 5
 
@@ -358,7 +393,7 @@ class TestToolExecution:
     def test_tool_execution_success(self) -> None:
         """Test successful tool execution."""
         tool = ToolExecution(
-            id="tool_001",
+            tool_execution_id="tool_001",
             tool_name="get_balance",
             arguments={"customer_id": "123"},
             result={"balance": 100},
@@ -370,7 +405,7 @@ class TestToolExecution:
     def test_tool_execution_error(self) -> None:
         """Test failed tool execution."""
         tool = ToolExecution(
-            id="tool_001",
+            tool_execution_id="tool_001",
             tool_name="get_balance",
             arguments={"customer_id": "invalid"},
             status=ToolStatus.ERROR,
@@ -387,13 +422,13 @@ class TestViolation:
         """Test creating a violation."""
         violation = Violation(
             code="UNSUPPORTED_CLAIM",
-            severity="medium",
-            claim_id="claim_001",
+            severity=Severity.MEDIUM,
+            claim_ids=["claim_001"],
             message="Claim is not supported by evidence",
         )
         assert violation.code == "UNSUPPORTED_CLAIM"
-        assert violation.severity == "medium"
-        assert violation.claim_id == "claim_001"
+        assert violation.severity == Severity.MEDIUM
+        assert violation.claim_ids == ["claim_001"]
 
 
 class TestTelemetryData:

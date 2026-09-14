@@ -14,6 +14,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout factlama-architecture (canonical contracts/v0.1 fixtures)
+        uses: actions/checkout@v4
+        with:
+          repository: Factlama/factlama-architecture
+          path: factlama-architecture
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -33,5 +39,7 @@ jobs:
       - name: Dependency-boundary check (import-linter)
         run: lint-imports
 
-      - name: Tests (pytest)
+      - name: Tests (pytest), including the G0 contract fixture suite
         run: pytest --cov=schemas --cov=core --cov=judges --cov-report=term-missing
+        env:
+          FACTLAMA_CONTRACTS_DIR: ${{ github.workspace }}/factlama-architecture/contracts/v0.1

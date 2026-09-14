@@ -26,8 +26,8 @@ class Citation(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    id: str = Field(..., description="Unique identifier for this citation")
+    citation_id: str = Field(..., description="Unique identifier for this citation")
     claim_id: str | None = Field(None, description="ID of the claim this citation supports")
-    source_id: str = Field(..., description="ID of the evidence/source being cited")
+    evidence_id: str = Field(..., description="ID of the evidence/source being cited")
     locator: Locator | None = Field(None, description="Location within the source")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")

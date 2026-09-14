@@ -1,7 +1,7 @@
 """Tests for scoring engine."""
 
 from core.scoring import ScoringEngine, derive_calibration_class, determine_verdict
-from schemas.claims import ClaimVerdict, ClaimVerification
+from schemas.claims import ClaimVerdict, ClaimVerification, RationaleCode
 from schemas.verification import OverallVerdict, ScoreStatus
 
 
@@ -28,10 +28,18 @@ class TestScoringEngine:
         """Test scoring with supported claims."""
         verifications = [
             ClaimVerification(
-                claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95
+                claim_id="claim_001",
+                verdict=ClaimVerdict.SUPPORTED,
+                confidence=0.95,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
             ),
             ClaimVerification(
-                claim_id="claim_002", verdict=ClaimVerdict.SUPPORTED, confidence=0.90
+                claim_id="claim_002",
+                verdict=ClaimVerdict.SUPPORTED,
+                confidence=0.90,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
             ),
         ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-1")
@@ -44,10 +52,17 @@ class TestScoringEngine:
         """Test scoring with unsupported claims."""
         verifications = [
             ClaimVerification(
-                claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95
+                claim_id="claim_001",
+                verdict=ClaimVerdict.SUPPORTED,
+                confidence=0.95,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
             ),
             ClaimVerification(
-                claim_id="claim_002", verdict=ClaimVerdict.UNSUPPORTED, confidence=0.90
+                claim_id="claim_002",
+                verdict=ClaimVerdict.UNSUPPORTED,
+                confidence=0.90,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
             ),
         ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-1")
@@ -59,10 +74,17 @@ class TestScoringEngine:
         """scoring.md: INSUFFICIENT_EVIDENCE contributes zero to groundedness, not partial credit."""
         verifications = [
             ClaimVerification(
-                claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95
+                claim_id="claim_001",
+                verdict=ClaimVerdict.SUPPORTED,
+                confidence=0.95,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
             ),
             ClaimVerification(
-                claim_id="claim_002", verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE, confidence=0.5
+                claim_id="claim_002",
+                verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE,
+                confidence=0.5,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
             ),
         ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-1")
@@ -72,7 +94,10 @@ class TestScoringEngine:
         """Test scoring with contradicted claims."""
         verifications = [
             ClaimVerification(
-                claim_id="claim_001", verdict=ClaimVerdict.CONTRADICTED, confidence=0.95
+                claim_id="claim_001",
+                verdict=ClaimVerdict.CONTRADICTED,
+                confidence=0.95,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
             ),
         ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-1")
@@ -84,10 +109,17 @@ class TestScoringEngine:
         """NOT_APPLICABLE claims are excluded from the applicable denominator."""
         verifications = [
             ClaimVerification(
-                claim_id="claim_001", verdict=ClaimVerdict.SUPPORTED, confidence=0.95
+                claim_id="claim_001",
+                verdict=ClaimVerdict.SUPPORTED,
+                confidence=0.95,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
             ),
             ClaimVerification(
-                claim_id="claim_002", verdict=ClaimVerdict.NOT_APPLICABLE, confidence=1.0
+                claim_id="claim_002",
+                verdict=ClaimVerdict.NOT_APPLICABLE,
+                confidence=1.0,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
             ),
         ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-1")
@@ -99,7 +131,14 @@ class TestScoringEngine:
         assert scores["groundedness"].calibration_class == "NONE"
 
     def test_calibration_class_propagates_to_claim_ratio_scores(self) -> None:
-        verifications = [ClaimVerification(claim_id="c1", verdict=ClaimVerdict.SUPPORTED)]
+        verifications = [
+            ClaimVerification(
+                claim_id="c1",
+                verdict=ClaimVerdict.SUPPORTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
+            )
+        ]
         scores = self.engine.calculate_scores(verifications, calibration_class="class-xyz")
         assert scores["groundedness"].calibration_class == "class-xyz"
         assert scores["hallucination_risk"].calibration_class == "class-xyz"
@@ -177,40 +216,91 @@ class TestDetermineVerdict:
         assert determine_verdict([]) == OverallVerdict.ABSTAIN
 
     def test_all_not_applicable_abstains(self) -> None:
-        claims = [ClaimVerification(claim_id="c1", verdict=ClaimVerdict.NOT_APPLICABLE)]
+        claims = [
+            ClaimVerification(
+                claim_id="c1",
+                verdict=ClaimVerdict.NOT_APPLICABLE,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+            )
+        ]
         assert determine_verdict(claims) == OverallVerdict.ABSTAIN
 
     def test_all_insufficient_evidence_abstains(self) -> None:
         claims = [
-            ClaimVerification(claim_id="c1", verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE),
-            ClaimVerification(claim_id="c2", verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE),
+            ClaimVerification(
+                claim_id="c1",
+                verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+            ),
+            ClaimVerification(
+                claim_id="c2",
+                verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+            ),
         ]
         assert determine_verdict(claims) == OverallVerdict.ABSTAIN
 
     def test_any_contradicted_fails(self) -> None:
         claims = [
-            ClaimVerification(claim_id="c1", verdict=ClaimVerdict.SUPPORTED),
-            ClaimVerification(claim_id="c2", verdict=ClaimVerdict.CONTRADICTED),
+            ClaimVerification(
+                claim_id="c1",
+                verdict=ClaimVerdict.SUPPORTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
+            ),
+            ClaimVerification(
+                claim_id="c2",
+                verdict=ClaimVerdict.CONTRADICTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+            ),
         ]
         assert determine_verdict(claims) == OverallVerdict.FAIL
 
     def test_all_supported_passes(self) -> None:
         claims = [
-            ClaimVerification(claim_id="c1", verdict=ClaimVerdict.SUPPORTED),
-            ClaimVerification(claim_id="c2", verdict=ClaimVerdict.SUPPORTED),
+            ClaimVerification(
+                claim_id="c1",
+                verdict=ClaimVerdict.SUPPORTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
+            ),
+            ClaimVerification(
+                claim_id="c2",
+                verdict=ClaimVerdict.SUPPORTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
+            ),
         ]
         assert determine_verdict(claims) == OverallVerdict.PASS
 
     def test_mixture_with_unsupported_is_partial(self) -> None:
         claims = [
-            ClaimVerification(claim_id="c1", verdict=ClaimVerdict.SUPPORTED),
-            ClaimVerification(claim_id="c2", verdict=ClaimVerdict.UNSUPPORTED),
+            ClaimVerification(
+                claim_id="c1",
+                verdict=ClaimVerdict.SUPPORTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
+            ),
+            ClaimVerification(
+                claim_id="c2",
+                verdict=ClaimVerdict.UNSUPPORTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+            ),
         ]
         assert determine_verdict(claims) == OverallVerdict.PARTIAL
 
     def test_mixture_with_insufficient_evidence_is_partial(self) -> None:
         claims = [
-            ClaimVerification(claim_id="c1", verdict=ClaimVerdict.SUPPORTED),
-            ClaimVerification(claim_id="c2", verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE),
+            ClaimVerification(
+                claim_id="c1",
+                verdict=ClaimVerdict.SUPPORTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
+            ),
+            ClaimVerification(
+                claim_id="c2",
+                verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+            ),
         ]
         assert determine_verdict(claims) == OverallVerdict.PARTIAL

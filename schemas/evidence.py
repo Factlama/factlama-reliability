@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class EvidenceType(str, Enum):
@@ -51,16 +51,36 @@ class Source(BaseModel):
 
 
 class Evidence(BaseModel):
-    """Evidence is a first-class object representing available context for verification."""
+    """Evidence is a first-class object representing available context for verification.
+
+    Exactly one of `content` (inline text) or `reference` (a pointer without
+    inline content, e.g. after content-governance redaction) is set --
+    contracts/v0.1's `oneOf`.
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    id: str = Field(..., description="Unique identifier for this evidence")
+    evidence_id: str = Field(..., description="Unique identifier for this evidence")
     type: EvidenceType = Field(default=EvidenceType.DOCUMENT, description="Type of evidence")
-    extracted_text: str = Field(..., description="The text content extracted from the source")
-    source: Source | None = Field(None, description="Source information")
+    content: str | None = Field(None, description="The text content extracted from the source")
+    reference: dict[str, Any] | None = Field(
+        None, description="Pointer to the content when it is not inlined here"
+    )
+    source_uri: str | None = Field(None, description="URI of the source (URL, file path, etc.)")
+    title: str | None = Field(None, description="Title of the source")
+    retrieval_rank: int | None = Field(None, ge=0, description="Rank in the retrieval result set")
+    retrieval_score: float | None = Field(None, description="Retriever-assigned relevance score")
+    timestamp: str | None = Field(None, description="RFC 3339 timestamp for this evidence")
+    trust_label: str | None = Field(None, description="Caller-assigned trust label")
+    source: Source | None = Field(None, description="Extended source information")
     locator: Locator | None = Field(None, description="Precise location of this evidence span")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
 
+    @model_validator(mode="after")
+    def validate_content_xor_reference(self) -> "Evidence":
+        if (self.content is None) == (self.reference is None):
+            raise ValueError("Evidence must set exactly one of content or reference")
+        return self
+
     def __hash__(self) -> int:
-        return hash(self.id)
+        return hash(self.evidence_id)

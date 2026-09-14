@@ -15,7 +15,7 @@ from judges.port import (
     JudgeResult,
     bounded_check,
 )
-from schemas.claims import ClaimVerdict, EvidenceReference
+from schemas.claims import ClaimVerdict, RationaleCode
 from schemas.instruction import Instruction
 from schemas.policy import Policy
 
@@ -63,38 +63,32 @@ class MockModelProvider(JudgeProvider):
             return JudgeResult(
                 verdict=ClaimVerdict.INSUFFICIENT_EVIDENCE,
                 confidence=0.5,
-                evidence=[],
+                rationale_code=RationaleCode.NO_EVIDENCE_SUPPLIED,
                 reason="No evidence provided",
             )
 
         # Check if claim text appears in any evidence
         claim_lower = claim.text.lower()
-        evidence_refs: list[EvidenceReference] = []
-        found_support = False
+        supporting_ids: list[str] = []
 
         for ev in evidence:
-            if claim_lower in ev.extracted_text.lower() or ev.extracted_text.lower() in claim_lower:
-                found_support = True
-                evidence_refs.append(
-                    EvidenceReference(
-                        evidence_id=ev.id,
-                        support=0.9,
-                        relevance=0.95,
-                    )
-                )
+            ev_text = (ev.content or "").lower()
+            if claim_lower in ev_text or ev_text in claim_lower:
+                supporting_ids.append(ev.evidence_id)
 
-        if found_support:
+        if supporting_ids:
             return JudgeResult(
                 verdict=ClaimVerdict.SUPPORTED,
                 confidence=self.default_confidence,
-                evidence=evidence_refs,
+                evidence_ids=supporting_ids,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
                 reason="Claim found in evidence",
             )
         else:
             return JudgeResult(
                 verdict=ClaimVerdict.UNSUPPORTED,
                 confidence=0.7,
-                evidence=[],
+                rationale_code=RationaleCode.NO_SUPPORT,
                 reason="Claim not found in evidence",
             )
 
@@ -161,12 +155,13 @@ class RuleBasedProvider(JudgeProvider):
             match_threshold=self.support_threshold,
             contradiction_threshold=self.contradiction_threshold,
         )
-        verification = mapper.map_evidence(request.claim, request.evidence)
+        mapping = mapper.map_evidence(request.claim, request.evidence)
         return JudgeResult(
-            verdict=verification.verdict,
-            evidence=verification.evidence,
-            confidence=verification.confidence,
-            reason=verification.reason,
+            verdict=mapping.verdict,
+            evidence_ids=mapping.evidence_ids,
+            confidence=mapping.confidence,
+            rationale_code=mapping.rationale_code,
+            reason=mapping.reason,
         )
 
     def evaluate_instruction(

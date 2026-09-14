@@ -73,7 +73,7 @@ class SimpleClaimExtractor(ClaimExtractor):
             importance = self._calculate_importance(sentence, idx, len(sentences))
 
             claim = Claim(
-                id=f"claim_{idx + 1:03d}",
+                claim_id=f"claim_{idx + 1:03d}",
                 text=sentence,
                 type=claim_type,
                 importance=importance,
@@ -282,7 +282,7 @@ class EnhancedClaimExtractor(ClaimExtractor):
                 )
 
                 claim = Claim(
-                    id=f"claim_{claim_idx + 1:03d}",
+                    claim_id=f"claim_{claim_idx + 1:03d}",
                     text=clause,
                     type=claim_type,
                     importance=importance,

@@ -15,7 +15,7 @@ from judges.port import (
 )
 from judges.providers import MockModelProvider, RuleBasedProvider
 from judges.vendor_adapters import NLIProvider
-from schemas.claims import Claim, ClaimVerdict, EvidenceReference
+from schemas.claims import Claim, ClaimVerdict
 from schemas.evidence import Evidence
 from schemas.instruction import Instruction, InstructionType
 from schemas.policy import Policy, ScopePolicy
@@ -41,12 +41,12 @@ class TestJudgeResultInvariants:
 
     def test_supported_without_evidence_is_downgraded_to_invalid_response(self) -> None:
         """CONTRACTS.md: SUPPORTED without a cited evidence ID is INVALID_RESPONSE."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
         request = JudgeRequest(
             claim=claim,
-            evidence=[Evidence(id="doc_1", extracted_text="Company X was founded in 2018.")],
+            evidence=[Evidence(evidence_id="doc_1", content="Company X was founded in 2018.")],
         )
-        malformed = JudgeResult(verdict=ClaimVerdict.SUPPORTED, evidence=[])
+        malformed = JudgeResult(verdict=ClaimVerdict.SUPPORTED, evidence_ids=[])
         validated = validate_judge_result(malformed, request)
 
         assert validated.verdict is None
@@ -57,14 +57,14 @@ class TestJudgeResultInvariants:
         """A judge citing an evidence ID that was never part of its request must not be
         trusted -- citing a nonexistent ID is not a real citation, matching the "without a
         cited evidence ID" rule in spirit."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
         request = JudgeRequest(
             claim=claim,
-            evidence=[Evidence(id="doc_1", extracted_text="Company X was founded in 2018.")],
+            evidence=[Evidence(evidence_id="doc_1", content="Company X was founded in 2018.")],
         )
         hallucinated = JudgeResult(
             verdict=ClaimVerdict.SUPPORTED,
-            evidence=[EvidenceReference(evidence_id="doc_999", support=0.9, relevance=0.9)],
+            evidence_ids=["doc_999"],
         )
         validated = validate_judge_result(hallucinated, request)
 
@@ -74,22 +74,22 @@ class TestJudgeResultInvariants:
 
     def test_supported_with_evidence_passes_through(self) -> None:
         """A well-formed SUPPORTED result is not altered."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
         request = JudgeRequest(
             claim=claim,
-            evidence=[Evidence(id="doc_1", extracted_text="Company X was founded in 2018.")],
+            evidence=[Evidence(evidence_id="doc_1", content="Company X was founded in 2018.")],
         )
         result = JudgeResult(
             verdict=ClaimVerdict.SUPPORTED,
-            evidence=[EvidenceReference(evidence_id="doc_1", support=0.9, relevance=0.9)],
+            evidence_ids=["doc_1"],
         )
         assert validate_judge_result(result, request) is result
 
     def test_non_supported_verdicts_are_not_affected(self) -> None:
         """The evidence-citation rule is specific to SUPPORTED, not every verdict."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
         request = JudgeRequest(claim=claim, evidence=[])
-        result = JudgeResult(verdict=ClaimVerdict.UNSUPPORTED, evidence=[])
+        result = JudgeResult(verdict=ClaimVerdict.UNSUPPORTED, evidence_ids=[])
         assert validate_judge_result(result, request) is result
 
 
@@ -103,12 +103,12 @@ class TestCitationSupportCheck:
     def test_downgrades_supported_verdict_with_no_shared_content(self) -> None:
         """A SUPPORTED verdict citing real evidence that is unrelated to the claim must not
         be trusted as-is."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
-        evidence = Evidence(id="doc_1", extracted_text="The weather today is sunny and warm.")
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
+        evidence = Evidence(evidence_id="doc_1", content="The weather today is sunny and warm.")
         request = JudgeRequest(claim=claim, evidence=[evidence])
         result = JudgeResult(
             verdict=ClaimVerdict.SUPPORTED,
-            evidence=[EvidenceReference(evidence_id="doc_1", support=0.9, relevance=0.9)],
+            evidence_ids=["doc_1"],
         )
 
         downgraded, changed = apply_citation_support_check(result, request)
@@ -119,12 +119,12 @@ class TestCitationSupportCheck:
 
     def test_passes_through_supported_verdict_with_shared_content(self) -> None:
         """Matching evidence is left untouched."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
-        evidence = Evidence(id="doc_1", extracted_text="Company X was founded in 2018.")
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
+        evidence = Evidence(evidence_id="doc_1", content="Company X was founded in 2018.")
         request = JudgeRequest(claim=claim, evidence=[evidence])
         result = JudgeResult(
             verdict=ClaimVerdict.SUPPORTED,
-            evidence=[EvidenceReference(evidence_id="doc_1", support=0.9, relevance=0.9)],
+            evidence_ids=["doc_1"],
         )
 
         unchanged, changed = apply_citation_support_check(result, request)
@@ -135,12 +135,12 @@ class TestCitationSupportCheck:
     def test_does_not_reject_legitimate_paraphrase_with_partial_overlap(self) -> None:
         """Low but nonzero overlap must not be rejected -- CONTRACTS.md: "legitimate
         paraphrase is not rejected solely for lacking shared words"."""
-        claim = Claim(id="claim_001", text="The firm began operations in 2018.")
-        evidence = Evidence(id="doc_1", extracted_text="Company X was founded in the year 2018.")
+        claim = Claim(claim_id="claim_001", text="The firm began operations in 2018.")
+        evidence = Evidence(evidence_id="doc_1", content="Company X was founded in the year 2018.")
         request = JudgeRequest(claim=claim, evidence=[evidence])
         result = JudgeResult(
             verdict=ClaimVerdict.SUPPORTED,
-            evidence=[EvidenceReference(evidence_id="doc_1", support=0.9, relevance=0.9)],
+            evidence_ids=["doc_1"],
         )
 
         _, changed = apply_citation_support_check(result, request)
@@ -149,9 +149,9 @@ class TestCitationSupportCheck:
 
     def test_non_supported_verdicts_are_not_affected(self) -> None:
         """The overlap check is specific to SUPPORTED, not every verdict."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
         request = JudgeRequest(claim=claim, evidence=[])
-        result = JudgeResult(verdict=ClaimVerdict.UNSUPPORTED, evidence=[])
+        result = JudgeResult(verdict=ClaimVerdict.UNSUPPORTED, evidence_ids=[])
 
         unchanged, changed = apply_citation_support_check(result, request)
 
@@ -172,20 +172,20 @@ class TestMockModelProvider:
 
     def test_evaluate_supported(self) -> None:
         """Test claim verification with supporting evidence."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
-        evidence = [Evidence(id="doc_001", extracted_text="Company X was founded in 2018.")]
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
+        evidence = [Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")]
         result = self.provider.evaluate(
             JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
         )
         assert result.error is None
         assert result.verdict == ClaimVerdict.SUPPORTED
         assert result.confidence > 0.9
-        assert len(result.evidence) == 1
+        assert len(result.evidence_ids) == 1
 
     def test_evaluate_unsupported(self) -> None:
         """Test claim verification without supporting evidence."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
-        evidence = [Evidence(id="doc_001", extracted_text="Company X is a technology company.")]
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
+        evidence = [Evidence(evidence_id="doc_001", content="Company X is a technology company.")]
         result = self.provider.evaluate(
             JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
         )
@@ -193,7 +193,7 @@ class TestMockModelProvider:
 
     def test_evaluate_no_evidence(self) -> None:
         """Test claim verification with no evidence."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
         result = self.provider.evaluate(
             JudgeRequest(claim=claim, evidence=[]), FAR_DEADLINE, CancellationToken()
         )
@@ -202,7 +202,7 @@ class TestMockModelProvider:
 
     def test_evaluate_returns_cancelled_error_when_already_cancelled(self) -> None:
         """A cancelled token must short-circuit before any evaluation logic runs."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
         cancellation = CancellationToken()
         cancellation.cancel()
         result = self.provider.evaluate(
@@ -214,7 +214,7 @@ class TestMockModelProvider:
 
     def test_evaluate_returns_timeout_error_when_deadline_passed(self) -> None:
         """A deadline already in the past must short-circuit as TIMEOUT."""
-        claim = Claim(id="claim_001", text="Company X was founded in 2018.")
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
         past_deadline = time.monotonic() - 1.0
         result = self.provider.evaluate(
             JudgeRequest(claim=claim, evidence=[]), past_deadline, CancellationToken()
@@ -225,7 +225,7 @@ class TestMockModelProvider:
     def test_evaluate_instruction(self) -> None:
         """Test instruction evaluation."""
         instruction = Instruction(
-            id="inst_001", text="Return JSON only.", type=InstructionType.FORMAT
+            instruction_id="inst_001", text="Return JSON only.", type=InstructionType.FORMAT
         )
         score, reason = self.provider.evaluate_instruction("Some answer", instruction)
         assert score == 1.0
@@ -252,8 +252,8 @@ class TestRuleBasedProvider:
 
     def test_evaluate_with_matching_evidence(self) -> None:
         """Test verification when evidence matches claim."""
-        claim = Claim(id="claim_001", text="The product weighs 2.4 kg.")
-        evidence = [Evidence(id="doc_001", extracted_text="The product weighs 2.4 kg.")]
+        claim = Claim(claim_id="claim_001", text="The product weighs 2.4 kg.")
+        evidence = [Evidence(evidence_id="doc_001", content="The product weighs 2.4 kg.")]
         result = self.provider.evaluate(
             JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
         )
@@ -261,8 +261,8 @@ class TestRuleBasedProvider:
 
     def test_evaluate_with_contradiction(self) -> None:
         """Test verification when evidence contradicts claim."""
-        claim = Claim(id="claim_001", text="The product weighs 2.4 kg.")
-        evidence = [Evidence(id="doc_001", extracted_text="The product weighs 3.4 kg.")]
+        claim = Claim(claim_id="claim_001", text="The product weighs 2.4 kg.")
+        evidence = [Evidence(evidence_id="doc_001", content="The product weighs 3.4 kg.")]
         result = self.provider.evaluate(
             JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
         )
@@ -275,8 +275,8 @@ class TestRuleBasedProvider:
 
     def test_evaluate_no_relevant_evidence(self) -> None:
         """Test verification when evidence is irrelevant."""
-        claim = Claim(id="claim_001", text="The product costs $500.")
-        evidence = [Evidence(id="doc_001", extracted_text="The product is blue.")]
+        claim = Claim(claim_id="claim_001", text="The product costs $500.")
+        evidence = [Evidence(evidence_id="doc_001", content="The product is blue.")]
         result = self.provider.evaluate(
             JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
         )
@@ -285,7 +285,7 @@ class TestRuleBasedProvider:
     def test_evaluate_instruction_json_format(self) -> None:
         """Test instruction evaluation for JSON format."""
         instruction = Instruction(
-            id="inst_001", text="Return JSON only.", type=InstructionType.FORMAT
+            instruction_id="inst_001", text="Return JSON only.", type=InstructionType.FORMAT
         )
 
         score, _ = self.provider.evaluate_instruction('{"key": "value"}', instruction)

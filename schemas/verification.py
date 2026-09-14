@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from schemas.citation import Citation
-from schemas.claims import ClaimVerification
+from schemas.claims import Claim, ClaimVerification
 from schemas.evidence import Evidence
 from schemas.instruction import Instruction
 from schemas.policy import Policy
@@ -23,37 +23,66 @@ class VerificationMode(str, Enum):
 
 
 class OverallVerdict(str, Enum):
-    """Overall verification verdict."""
+    """Overall verification verdict.
+
+    DISPUTED cannot be produced by this pipeline yet (see ResultStatus); it
+    is present for the same fixture-compatibility reason.
+    """
 
     PASS = "PASS"
     PARTIAL = "PARTIAL"
     FAIL = "FAIL"
     ABSTAIN = "ABSTAIN"
+    DISPUTED = "DISPUTED"
 
 
 class ResultStatus(str, Enum):
     """Pipeline execution status for a verification result.
 
-    DISPUTED is deliberately omitted: this MVP dispatches one judge attempt
-    per claim, so multi-judge disagreement (ADR-015, deferred) cannot occur.
+    This pipeline cannot itself produce DISPUTED yet: it dispatches one
+    judge attempt per claim, so multi-judge disagreement (G5's bounded
+    retries/fallback) cannot occur. It is present so this type can still
+    parse every valid contracts/v0.1 fixture, including dispute cases.
     """
 
     COMPLETED = "COMPLETED"
     ABSTAINED = "ABSTAINED"
     FAILED = "FAILED"
+    DISPUTED = "DISPUTED"
 
 
 class AbstentionReason(str, Enum):
     """Why a result abstained rather than returning a factual verdict.
 
-    BUDGET_EXHAUSTED, NO_COMPLIANT_PROVIDER and REVOKED are omitted: there is
-    no budget enforcement or provider registry in this pass.
+    BUDGET_EXHAUSTED, NO_COMPLIANT_PROVIDER and REVOKED cannot be produced
+    by this pipeline yet -- there is no budget enforcement (G3) or provider
+    registry (G10) in this pass. They are present so this type can still
+    parse every valid contracts/v0.1 fixture that uses them.
     """
 
     NO_CHECKABLE_CLAIMS = "NO_CHECKABLE_CLAIMS"
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
     PROVIDER_FAILURE = "PROVIDER_FAILURE"
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    NO_COMPLIANT_PROVIDER = "NO_COMPLIANT_PROVIDER"
+    REVOKED = "REVOKED"
     CANCELLED = "CANCELLED"
+
+
+class DisputeReason(str, Enum):
+    """Why a result is DISPUTED. Single value today; additive vocabulary."""
+
+    JUDGE_DISAGREEMENT = "JUDGE_DISAGREEMENT"
+
+
+class Severity(str, Enum):
+    """Violation severity (contracts/v0.1's uppercase wire values)."""
+
+    INFO = "INFO"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
 
 
 class ScoreStatus(str, Enum):
@@ -110,6 +139,7 @@ class Cost(BaseModel):
     currency: str | None = Field(
         None, description="ISO currency code, only set when status is MEASURED"
     )
+    pricing_version: str | None = Field(None, description="Versioned price source, when known")
 
 
 class Usage(BaseModel):
@@ -164,10 +194,10 @@ class Violation(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     code: str = Field(..., description="Violation code")
-    severity: str = Field(..., description="Severity level: info, low, medium, high, critical")
-    claim_id: str | None = Field(None, description="ID of the related claim")
-    message: str = Field(..., description="Human-readable violation message")
-    evidence_id: str | None = Field(None, description="ID of related evidence")
+    severity: Severity = Field(..., description="Severity level")
+    claim_ids: list[str] = Field(default_factory=list, description="IDs of related claims")
+    evidence_ids: list[str] = Field(default_factory=list, description="IDs of related evidence")
+    message: str | None = Field(None, description="Human-readable violation message")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
 
 
@@ -206,6 +236,14 @@ class VerificationRequest(BaseModel):
     question: str | None = Field(None, description="User task/question")
     answer: str = Field(..., min_length=1, description="AI-generated answer to verify")
     evidence: list[Evidence] = Field(default_factory=list, description="Available evidence")
+    claims: list[Claim] = Field(
+        default_factory=list,
+        description=(
+            "Caller-supplied explicit claims, wire-compatible with contracts/v0.1. "
+            "Not yet consumed: this pipeline always extracts its own claims from "
+            "`answer` (see core.claims) -- explicit-claims mode is G3 work."
+        ),
+    )
     instructions: list[Instruction] = Field(
         default_factory=list, description="Applicable instructions"
     )
@@ -232,6 +270,19 @@ class VerificationRequest(BaseModel):
     model: str | None = Field(None, description="Model that produced the answer being verified")
     prompt_version: str | None = Field(None, description="Prompt version that produced the answer")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Application metadata")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_client_supplied_tenant_id(cls, data: Any) -> Any:
+        """contracts/v0.1: a `tenant_id` field on this payload is invalid, not merely
+        ignored -- silently dropping it would hide a client bug or a spoofing attempt
+        instead of rejecting the malformed request outright."""
+        if isinstance(data, dict) and "tenant_id" in data:
+            raise ValueError(
+                "VerificationRequest must not carry tenant_id; tenant identity comes "
+                "from authenticated ingress context, never a client-supplied field"
+            )
+        return data
 
     @model_validator(mode="after")
     def validate_schema_version(self) -> "VerificationRequest":
@@ -263,7 +314,10 @@ class VerificationResult(BaseModel):
     )
     status: ResultStatus = Field(..., description="Pipeline execution status")
     abstention_reason: AbstentionReason | None = Field(
-        None, description="Required when status is ABSTAINED"
+        None, description="Required when status is FAILED or ABSTAINED"
+    )
+    dispute_reason: DisputeReason | None = Field(
+        None, description="Required when status is DISPUTED"
     )
     verdict: OverallVerdict = Field(..., description="Overall verification verdict")
     scores: dict[str, ScoreValue] = Field(
@@ -280,18 +334,28 @@ class VerificationResult(BaseModel):
     usage_summary: Usage = Field(
         default_factory=Usage, description="Known usage summed across attempts"
     )
+    supersedes: str | None = Field(
+        None, description="ID of an earlier evaluation this result supersedes"
+    )
     metadata: dict[str, Any] = Field(
         default_factory=dict, description="Additional non-sensitive metadata"
     )
 
     @model_validator(mode="after")
-    def validate_abstention_reason(self) -> "VerificationResult":
-        """FAILED and ABSTAINED must carry verdict=ABSTAIN with a reason; others must not."""
+    def validate_abstention_and_dispute_reason(self) -> "VerificationResult":
+        """FAILED/ABSTAINED require verdict=ABSTAIN + abstention_reason; DISPUTED requires
+        verdict=DISPUTED + dispute_reason. This pipeline cannot produce DISPUTED yet
+        (see ResultStatus), but the rule is enforced here so it is ready when G5 can."""
         if self.status in (ResultStatus.FAILED, ResultStatus.ABSTAINED):
             if self.verdict != OverallVerdict.ABSTAIN:
                 raise ValueError(f"status={self.status} requires verdict=ABSTAIN")
             if self.abstention_reason is None:
                 raise ValueError(f"status={self.status} requires an abstention_reason")
+        if self.status == ResultStatus.DISPUTED:
+            if self.verdict != OverallVerdict.DISPUTED:
+                raise ValueError(f"status={self.status} requires verdict=DISPUTED")
+            if self.dispute_reason is None:
+                raise ValueError(f"status={self.status} requires a dispute_reason")
         return self
 
     def to_dict(self) -> dict[str, Any]:
