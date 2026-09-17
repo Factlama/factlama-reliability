@@ -6,6 +6,10 @@ The authoritative component documentation is in [factlama-architecture/factlama-
 
 Run the existing tests with `.venv/bin/python -m pytest -q` when a local virtual environment exists, or install the `dev` extra into your own environment first. Do not mark a REL task complete solely because the prototype tests pass.
 
+## Contributing and license
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the signed-off commit and pull-request workflow. FactLama Reliability is licensed under the [Apache License 2.0](LICENSE); third-party SDKs, model weights and datasets retain their own licenses.
+
 ## Running the API locally
 
 ```bash
