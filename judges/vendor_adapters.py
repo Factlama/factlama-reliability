@@ -281,6 +281,13 @@ class EmbeddingProvider(JudgeProvider):
 
         return 0.0, []
 
+    @property
+    def compliance_tags(self) -> frozenset[str]:
+        # A locally-loaded model: the evaluate() call itself makes no
+        # external network request (the vendor SDK only fetches model
+        # weights once, outside of any single evaluation).
+        return frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"})
+
 
 class NLIProvider(JudgeProvider):
     """Natural Language Inference (NLI) based verification provider.
@@ -494,3 +501,7 @@ class NLIProvider(JudgeProvider):
         if not policy.scope.enabled:
             return 0.0, []
         return 0.0, []
+
+    @property
+    def compliance_tags(self) -> frozenset[str]:
+        return frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"})

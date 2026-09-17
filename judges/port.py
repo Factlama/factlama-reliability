@@ -28,7 +28,15 @@ from schemas.verification import Usage
 
 
 class JudgeErrorCode(str, Enum):
-    """Typed provider/dispatch error taxonomy (CONTRACTS.md)."""
+    """Typed provider/dispatch error taxonomy (CONTRACTS.md).
+
+    BUDGET_EXHAUSTED and NO_COMPLIANT_PROVIDER are pre-dispatch gate outcomes
+    (checked once per request by `core.budgets`/`core.compliance`, not per
+    claim) rather than a live provider's own failure mode; they are part of
+    this enum because CONTRACTS.md's provider/dispatch error vocabulary
+    includes them and `Attempt.error` stores a value from this same set.
+    REVOKED is not produced by this pipeline yet -- it needs G10's registry.
+    """
 
     TIMEOUT = "TIMEOUT"
     RATE_LIMIT = "RATE_LIMIT"
@@ -36,6 +44,9 @@ class JudgeErrorCode(str, Enum):
     INVALID_RESPONSE = "INVALID_RESPONSE"
     CANCELLED = "CANCELLED"
     CONFIGURATION = "CONFIGURATION"
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    NO_COMPLIANT_PROVIDER = "NO_COMPLIANT_PROVIDER"
+    REVOKED = "REVOKED"
 
 
 class CancellationToken:
@@ -200,6 +211,48 @@ def apply_citation_support_check(
     return downgraded, True
 
 
+_INJECTION_PATTERNS = [
+    re.compile(
+        r"\bignore\s+(all\s+|the\s+)?(previous|prior|above)\s+instructions?\b", re.IGNORECASE
+    ),
+    re.compile(r"\bdisregard\s+(the\s+)?(claim|verdict|rationale|instructions?)\b", re.IGNORECASE),
+    re.compile(r"\bmark\s+(this|the)\s+claim\s+as\s+(supported|true|verified)\b", re.IGNORECASE),
+    re.compile(r"\breturn\s+(verdict\s*[:=]?\s*)?supported\b", re.IGNORECASE),
+    re.compile(
+        r"\byou\s+(are|must)\s+(now\s+)?(a|acting as|the)\s+(judge|verifier|evaluator)\b",
+        re.IGNORECASE,
+    ),
+]
+
+
+def detect_evidence_injection(result: JudgeResult, request: JudgeRequest) -> list[str]:
+    """Flag cited evidence containing judge-directive-style language.
+
+    This is defense-in-depth, not the primary guard: `validate_judge_result()`
+    already rejects a SUPPORTED verdict citing no real evidence ID, and
+    `apply_citation_support_check()` already downgrades one whose cited
+    evidence shares no content with the claim. A judge that ignored an
+    injection attempt entirely (the expected case, since evidence is passed
+    as untrusted data, never concatenated into instructions -- CONTRACTS.md)
+    still produces a correct verdict; this only surfaces that an attempt was
+    present in evidence the judge actually cited, for CONTRACTS.md's reserved
+    `EVIDENCE_INJECTION_SUSPECTED` violation code. Returns the cited evidence
+    IDs that matched, or an empty list.
+    """
+    if result.error is not None or not result.evidence_ids:
+        return []
+
+    evidence_by_id = {e.evidence_id: e for e in request.evidence}
+    hits: list[str] = []
+    for eid in result.evidence_ids:
+        evidence = evidence_by_id.get(eid)
+        if evidence is None or not evidence.content:
+            continue
+        if any(pattern.search(evidence.content) for pattern in _INJECTION_PATTERNS):
+            hits.append(eid)
+    return hits
+
+
 def bounded_check(deadline: float, cancellation: CancellationToken) -> JudgeError | None:
     """Shared pre-dispatch deadline/cancellation check for every provider."""
     if cancellation.is_cancelled:
@@ -266,3 +319,16 @@ class JudgeProvider(ABC):
         capability. Defaults to no breach.
         """
         return 0.0, []
+
+    @property
+    def compliance_tags(self) -> frozenset[str]:
+        """Static compliance attributes this provider declares.
+
+        A G3-scoped baseline (`core.compliance.is_provider_compliant`), not a
+        lookup against G10's evaluator registry -- there is no tenant
+        approval/audit trail yet, only a static tag comparison against
+        whatever a policy declares it requires. Default: no attributes
+        declared, so any policy with at least one `required_provider_compliance`
+        tag rejects this provider until it overrides this property.
+        """
+        return frozenset()

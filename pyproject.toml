@@ -35,6 +35,13 @@ dev = [
     "mypy>=1.0.0",
     "ruff>=0.1.0",
     "import-linter>=2.0",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "httpx>=0.27.0",
+]
+api = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
 ]
 embeddings = [
     "sentence-transformers>=3.0.0",
@@ -52,7 +59,7 @@ all = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["schemas", "core", "judges"]
+packages = ["schemas", "core", "judges", "api"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -89,7 +96,7 @@ select = [
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["schemas", "core", "judges"]
+known-first-party = ["schemas", "core", "judges", "api"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -113,17 +120,23 @@ module = ["sentence_transformers.*", "transformers.*", "torch.*"]
 ignore_missing_imports = true
 
 [tool.importlinter]
-root_packages = ["schemas", "core", "judges"]
+root_packages = ["schemas", "core", "judges", "api"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "schemas is a pure data layer with no internal dependencies"
 type = "forbidden"
 source_modules = ["schemas"]
-forbidden_modules = ["core", "judges"]
+forbidden_modules = ["core", "judges", "api"]
 
 [[tool.importlinter.contracts]]
 name = "domain code (schemas, core) must not import a vendor model SDK directly (ADR-004)"
 type = "forbidden"
 source_modules = ["schemas", "core"]
 forbidden_modules = ["sentence_transformers", "transformers", "torch", "openai", "anthropic"]
+
+[[tool.importlinter.contracts]]
+name = "api is the outermost layer; domain code (schemas, core, judges) must not import it"
+type = "forbidden"
+source_modules = ["schemas", "core", "judges"]
+forbidden_modules = ["api"]

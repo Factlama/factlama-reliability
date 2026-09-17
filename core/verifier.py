@@ -6,16 +6,20 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from core.budgets import check_request_budget
 from core.claims import ClaimExtractor, EnhancedClaimExtractor
+from core.compliance import is_provider_compliant
 from core.evidence import EvidenceMapper, SimpleEvidenceMapper
 from core.policy import PolicyEngine
 from core.result import VerificationResultBuilder
 from core.scoring import ScoringEngine, derive_calibration_class, determine_verdict
 from judges.port import (
     CancellationToken,
+    JudgeErrorCode,
     JudgeProvider,
     JudgeRequest,
     apply_citation_support_check,
+    detect_evidence_injection,
     validate_judge_result,
 )
 from judges.providers import RuleBasedProvider
@@ -130,7 +134,45 @@ class Verifier:
         try:
             policy = request.policy or Policy(id="default")
 
-            claims = self._extract_claims(request.answer)
+            claims = (
+                list(request.claims) if request.claims else self._extract_claims(request.answer)
+            )
+
+            budget_violation = check_request_budget(len(claims), len(request.evidence))
+            if budget_violation is not None:
+                logger.warning(
+                    "Request %s abstained before dispatch: %s",
+                    request.request_id,
+                    budget_violation,
+                )
+                return self._abstained_result(
+                    builder,
+                    started_at,
+                    request,
+                    reason=AbstentionReason.BUDGET_EXHAUSTED,
+                    error_label=JudgeErrorCode.BUDGET_EXHAUSTED.value,
+                    claim_count=len(claims),
+                )
+
+            if not is_provider_compliant(
+                self.model_provider.compliance_tags, policy.required_provider_compliance
+            ):
+                logger.warning(
+                    "Request %s abstained before dispatch: provider '%s' (tags=%s) does not "
+                    "satisfy policy's required_provider_compliance=%s",
+                    request.request_id,
+                    self.model_provider.name,
+                    sorted(self.model_provider.compliance_tags),
+                    policy.required_provider_compliance,
+                )
+                return self._abstained_result(
+                    builder,
+                    started_at,
+                    request,
+                    reason=AbstentionReason.NO_COMPLIANT_PROVIDER,
+                    error_label=JudgeErrorCode.NO_COMPLIANT_PROVIDER.value,
+                    claim_count=len(claims),
+                )
 
             claim_verifications, attempts, calibration_class, judge_citation_violations = (
                 self._verify_claims(
@@ -299,6 +341,65 @@ class Verifier:
 
         return ResultStatus.COMPLETED, verdict, None
 
+    def _abstained_result(
+        self,
+        builder: VerificationResultBuilder,
+        started_at: datetime,
+        request: VerificationRequest,
+        reason: AbstentionReason,
+        error_label: str,
+        claim_count: int,
+    ) -> VerificationResult:
+        """Build a zero-dispatch abstained result for a pre-dispatch gate
+        failure (budget or provider compliance) -- no judge call happened
+        for any claim, so there is exactly one synthetic failed Attempt
+        recording why, not one per claim.
+        """
+        completed_at = datetime.now(timezone.utc)
+        attempt = Attempt(
+            attempt_id=f"attempt_{uuid.uuid4().hex[:12]}",
+            provider_id=self.model_provider.name,
+            configuration_version="0.1",
+            qualification_status=QualificationStatus.UNQUALIFIED,
+            calibration_class=derive_calibration_class(
+                evaluator_id=EVALUATOR_ID,
+                evaluator_version=EVALUATOR_VERSION,
+                provider_id=self.model_provider.name,
+                pinned_model_id=self.model_provider.name,
+                configuration_version="0.1",
+                qualification_status=QualificationStatus.UNQUALIFIED.value,
+            ),
+            outcome=AttemptOutcome.FAILED,
+            error=error_label,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+        provenance = Provenance(
+            evaluator_id=EVALUATOR_ID,
+            evaluator_version=EVALUATOR_VERSION,
+            policy_version=request.policy.version if request.policy else None,
+            mode=request.mode,
+            routing_profile_version=f"{request.mode.value.lower()}-0.1",
+            started_at=started_at,
+            completed_at=completed_at,
+            attempts=[attempt],
+        )
+        return (
+            builder.with_status(ResultStatus.ABSTAINED)
+            .with_abstention_reason(reason)
+            .with_verdict(OverallVerdict.ABSTAIN)
+            .with_scores(self.scoring_engine.calculate_scores([], calibration_class=None))
+            .with_provenance(provenance)
+            .with_metadata(
+                {
+                    "provider": self.model_provider.name,
+                    "claim_count": claim_count,
+                    "evidence_count": len(request.evidence),
+                }
+            )
+            .build()
+        )
+
     def _extract_claims(self, answer: str) -> list:
         """Extract claims from the answer."""
         return self.claim_extractor.extract(answer)
@@ -359,6 +460,22 @@ class Verifier:
                         message=(
                             "Judge-cited evidence shares no content with the claim; "
                             "downgraded from SUPPORTED to INSUFFICIENT_EVIDENCE"
+                        ),
+                    )
+                )
+
+            injected_evidence_ids = detect_evidence_injection(judge_result, judge_request)
+            if injected_evidence_ids:
+                citation_violations.append(
+                    Violation(
+                        code="EVIDENCE_INJECTION_SUSPECTED",
+                        severity=Severity.HIGH,
+                        claim_ids=[claim.claim_id],
+                        evidence_ids=injected_evidence_ids,
+                        message=(
+                            "Cited evidence contains judge-directive-style language; "
+                            "the verdict above was reached independently of it, but the "
+                            "attempt is flagged for review"
                         ),
                     )
                 )

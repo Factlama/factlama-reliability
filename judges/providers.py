@@ -108,6 +108,10 @@ class MockModelProvider(JudgeProvider):
         """Return no scope breach for mock."""
         return 0.0, []
 
+    @property
+    def compliance_tags(self) -> frozenset[str]:
+        return frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"})
+
 
 class RuleBasedProvider(JudgeProvider):
     """Rule-based verification provider using heuristics and text matching.
@@ -215,3 +219,7 @@ class RuleBasedProvider(JudgeProvider):
             return breach_score, breach_domains
 
         return 0.0, []
+
+    @property
+    def compliance_tags(self) -> frozenset[str]:
+        return frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"})

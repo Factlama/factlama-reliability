@@ -34,12 +34,12 @@ jobs:
         run: ruff format --check .
 
       - name: Type check (mypy)
-        run: mypy schemas core judges
+        run: mypy schemas core judges api
 
       - name: Dependency-boundary check (import-linter)
         run: lint-imports
 
       - name: Tests (pytest), including the G0 contract fixture suite
-        run: pytest --cov=schemas --cov=core --cov=judges --cov-report=term-missing
+        run: pytest --cov=schemas --cov=core --cov=judges --cov=api --cov-report=term-missing
         env:
           FACTLAMA_CONTRACTS_DIR: ${{ github.workspace }}/factlama-architecture/contracts/v0.1

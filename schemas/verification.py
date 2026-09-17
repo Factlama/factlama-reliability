@@ -239,9 +239,10 @@ class VerificationRequest(BaseModel):
     claims: list[Claim] = Field(
         default_factory=list,
         description=(
-            "Caller-supplied explicit claims, wire-compatible with contracts/v0.1. "
-            "Not yet consumed: this pipeline always extracts its own claims from "
-            "`answer` (see core.claims) -- explicit-claims mode is G3 work."
+            "Caller-supplied explicit claims. When non-empty, the Verifier uses "
+            "these unchanged instead of extracting claims from `answer` -- "
+            "LOW_LEVEL_IMPLEMENTATION.md: 'explicit claims and supplied evidence "
+            "first.'"
         ),
     )
     instructions: list[Instruction] = Field(
@@ -292,6 +293,31 @@ class VerificationRequest(BaseModel):
             raise ValueError(
                 f"Unsupported schema version: {self.schema_version}. Supported: {supported_versions}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_unique_claim_ids(self) -> "VerificationRequest":
+        """LOW_LEVEL_IMPLEMENTATION.md: "If claims is supplied, validate
+        unique IDs and use it unchanged." A duplicate ID is rejected here,
+        before the Verifier ever sees it."""
+        if self.claims:
+            ids = [c.claim_id for c in self.claims]
+            if len(ids) != len(set(ids)):
+                raise ValueError("VerificationRequest.claims must have unique claim_id values")
+        return self
+
+    @model_validator(mode="after")
+    def validate_unique_evidence_ids(self) -> "VerificationRequest":
+        """LOW_LEVEL_IMPLEMENTATION.md: "Validate unique evidence IDs and
+        exactly one of content/reference." A duplicate evidence_id is
+        rejected here -- every ID-indexed lookup in `core`/`judges`
+        (citation checks, judge-cited-evidence validation) assumes
+        uniqueness and would otherwise let one entry silently shadow
+        another instead of failing loudly."""
+        if self.evidence:
+            ids = [e.evidence_id for e in self.evidence]
+            if len(ids) != len(set(ids)):
+                raise ValueError("VerificationRequest.evidence must have unique evidence_id values")
         return self
 
 

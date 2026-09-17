@@ -96,6 +96,15 @@ class Policy(BaseModel):
     instructions: InstructionPolicy = Field(default_factory=InstructionPolicy)
     tools: ToolPolicy = Field(default_factory=ToolPolicy)
     actions: ActionPolicy = Field(default_factory=ActionPolicy)
+    required_provider_compliance: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Compliance tags the dispatched JudgeProvider must declare (see "
+            "JudgeProvider.compliance_tags). Empty means no constraint. A "
+            "provider missing a required tag is never dispatched -- the "
+            "request abstains with NO_COMPLIANT_PROVIDER instead."
+        ),
+    )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional policy metadata")
 
     def to_dict(self) -> dict[str, Any]:
