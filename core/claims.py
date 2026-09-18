@@ -7,7 +7,18 @@ from schemas.claims import Claim, ClaimType
 
 
 class ClaimExtractor(ABC):
-    """Abstract base class for claim extraction."""
+    """Abstract base class for claim extraction.
+
+    `extractor_id`/`extractor_version` are recorded in the verification
+    result's metadata whenever this extractor actually ran (claim-engine.md:
+    "Record extractor ID/version in provenance; changing segmentation may
+    change scores and therefore needs benchmark review") -- this is what
+    lets a caller detect that a later re-extraction of an edited answer used
+    a different segmentation algorithm, not just a different position.
+    """
+
+    extractor_id: str
+    extractor_version: str
 
     @abstractmethod
     def extract(self, answer: str) -> list[Claim]:
@@ -17,9 +28,26 @@ class ClaimExtractor(ABC):
             answer: The AI-generated answer to extract claims from.
 
         Returns:
-            List of extracted claims.
+            List of extracted claims. IDs are deterministic ordinals scoped
+            to this one extraction call (`claim-engine.md`: "Stable IDs are
+            scoped to a logical request, not globally unique"); `start_char`/
+            `end_char` are populated when the claim text is still literally
+            present in `answer`, else left `None`.
         """
         ...
+
+
+def _locate_span(text: str, needle: str, search_from: int) -> tuple[int | None, int | None]:
+    """Find `needle` in `text` at or after `search_from`.
+
+    Returns `(start_char, end_char)`, or `(None, None)` if `needle` is no
+    longer a literal substring of `text` from that point on (e.g. a future
+    extractor normalizes/rewrites text instead of only slicing it).
+    """
+    start = text.find(needle, search_from)
+    if start == -1:
+        return None, None
+    return start, start + len(needle)
 
 
 class SimpleClaimExtractor(ClaimExtractor):
@@ -28,6 +56,9 @@ class SimpleClaimExtractor(ClaimExtractor):
     This is a baseline implementation. Production implementations should use
     NLP libraries or the FactLama SLM for more accurate claim extraction.
     """
+
+    extractor_id = "simple-sentence"
+    extractor_version = "1.0"
 
     def __init__(self, min_claim_length: int = 10) -> None:
         """Initialize the claim extractor.
@@ -56,6 +87,7 @@ class SimpleClaimExtractor(ClaimExtractor):
 
         # Split on sentence boundaries
         sentences = self._split_sentences(answer)
+        search_from = 0
 
         for idx, sentence in enumerate(sentences):
             sentence = sentence.strip()
@@ -72,11 +104,17 @@ class SimpleClaimExtractor(ClaimExtractor):
             # Calculate importance (simple heuristic based on position and content)
             importance = self._calculate_importance(sentence, idx, len(sentences))
 
+            start_char, end_char = _locate_span(answer, sentence, search_from)
+            if end_char is not None:
+                search_from = end_char
+
             claim = Claim(
                 claim_id=f"claim_{idx + 1:03d}",
                 text=sentence,
                 type=claim_type,
                 importance=importance,
+                start_char=start_char,
+                end_char=end_char,
             )
             claims.append(claim)
 
@@ -199,6 +237,9 @@ class EnhancedClaimExtractor(ClaimExtractor):
     - Multiple independent claims within a single sentence
     """
 
+    extractor_id = "enhanced-clause"
+    extractor_version = "1.0"
+
     def __init__(self, min_claim_length: int = 10) -> None:
         """Initialize the enhanced claim extractor.
 
@@ -256,6 +297,7 @@ class EnhancedClaimExtractor(ClaimExtractor):
         sentences = self._split_sentences(answer)
 
         claim_idx = 0
+        sentence_search_from = 0
         for sentence in sentences:
             sentence = sentence.strip()
             if not sentence or len(sentence) < self.min_claim_length:
@@ -264,6 +306,15 @@ class EnhancedClaimExtractor(ClaimExtractor):
             # Skip non-factual content
             if self._is_non_factual(sentence):
                 continue
+
+            # Locate this sentence's own span first, so each of its clauses
+            # (substrings of it) can be searched for from the right place --
+            # otherwise an identical clause repeated in an earlier sentence
+            # would be found there instead.
+            sentence_start, sentence_end = _locate_span(answer, sentence, sentence_search_from)
+            clause_search_from = (
+                sentence_start if sentence_start is not None else sentence_search_from
+            )
 
             # Split sentence into clauses
             clauses = self._split_into_clauses(sentence)
@@ -281,14 +332,23 @@ class EnhancedClaimExtractor(ClaimExtractor):
                     clause, claim_idx, len(clauses) + len(sentences)
                 )
 
+                start_char, end_char = _locate_span(answer, clause, clause_search_from)
+                if end_char is not None:
+                    clause_search_from = end_char
+
                 claim = Claim(
                     claim_id=f"claim_{claim_idx + 1:03d}",
                     text=clause,
                     type=claim_type,
                     importance=importance,
+                    start_char=start_char,
+                    end_char=end_char,
                 )
                 claims.append(claim)
                 claim_idx += 1
+
+            if sentence_end is not None:
+                sentence_search_from = sentence_end
 
         return claims
 
