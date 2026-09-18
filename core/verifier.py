@@ -6,7 +6,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from core.budgets import check_request_budget
+from core.budgets import (
+    check_request_budget,
+    check_usage_budget,
+    check_usage_reservation,
+    describe_cost_completeness,
+    summarize_usage,
+)
 from core.claims import ClaimExtractor, EnhancedClaimExtractor
 from core.compliance import is_provider_compliant
 from core.evidence import EvidenceMapper, SimpleEvidenceMapper
@@ -44,6 +50,7 @@ from schemas.verification import (
     QualificationStatus,
     ResultStatus,
     Severity,
+    Usage,
     VerificationRequest,
     VerificationResult,
     Violation,
@@ -61,8 +68,8 @@ _INSTRUCTION_SEVERITY = {
 # Below this adherence score, an instruction is considered violated.
 INSTRUCTION_ADHERENCE_THRESHOLD = 0.5
 
-# Per-claim judge dispatch budget. No ADR-012 budget enforcement exists yet;
-# this only bounds a single synchronous call's deadline.
+# Per-claim judge dispatch deadline. ADR-012's claim/evidence fan-out and
+# usage/cost ceilings are enforced separately (core.budgets).
 DEFAULT_JUDGE_TIMEOUT_SECONDS = 30.0
 
 EVALUATOR_ID = "reliability-verifier"
@@ -174,12 +181,22 @@ class Verifier:
                     claim_count=len(claims),
                 )
 
-            claim_verifications, attempts, calibration_class, judge_citation_violations = (
-                self._verify_claims(
-                    claims,
-                    request.evidence,
-                )
+            (
+                claim_verifications,
+                attempts,
+                calibration_class,
+                judge_citation_violations,
+                usage_budget_violation,
+            ) = self._verify_claims(
+                claims,
+                request.evidence,
             )
+            if usage_budget_violation is not None:
+                logger.warning(
+                    "Request %s's usage budget exceeded mid-dispatch: %s",
+                    request.request_id,
+                    usage_budget_violation,
+                )
 
             instruction_violations = self._evaluate_instructions(
                 request.answer, request.instructions
@@ -207,7 +224,10 @@ class Verifier:
             )
 
             status, verdict, abstention_reason = self._determine_status(
-                claims, claim_verifications, attempts
+                claims,
+                claim_verifications,
+                attempts,
+                usage_budget_exceeded=usage_budget_violation is not None,
             )
 
             policy_action, policy_violations = self.policy_engine.evaluate(
@@ -233,6 +253,39 @@ class Verifier:
                 attempts=attempts,
             )
 
+            metadata: dict[str, Any] = {
+                "provider": self.model_provider.name,
+                "claim_count": len(claims),
+                "evidence_count": len(request.evidence),
+                "instruction_count": len(request.instructions),
+                "citation_count": len(request.citations),
+                "tool_count": len(request.tool_executions),
+            }
+            if not request.claims:
+                # Extraction mode (not explicit claims): record which
+                # extractor/version produced these claim IDs/offsets
+                # (claim-engine.md: "Record extractor ID/version in
+                # provenance; changing segmentation may change scores").
+                # `getattr` with a fallback, not a hard attribute access:
+                # a caller-supplied extractor need only satisfy `extract()`
+                # (see e.g. tests' duck-typed stubs), not this optional
+                # identity contract.
+                metadata["extractor_id"] = getattr(
+                    self.claim_extractor, "extractor_id", type(self.claim_extractor).__name__
+                )
+                metadata["extractor_version"] = getattr(
+                    self.claim_extractor, "extractor_version", "unknown"
+                )
+
+            cost_completeness = describe_cost_completeness(attempts)
+            if cost_completeness is not None:
+                # summarize_usage()'s cost is a known partial total whenever
+                # an attempt's cost was UNAVAILABLE or measured in a
+                # non-USD currency -- flag that explicitly so a caller
+                # never mistakes "$X known" for "$X total" (see
+                # describe_cost_completeness's own docstring).
+                metadata["usage_cost_completeness"] = cost_completeness
+
             result = (
                 builder.with_status(status)
                 .with_abstention_reason(abstention_reason)
@@ -242,16 +295,8 @@ class Verifier:
                 .with_violations(violations + policy_violations)
                 .with_policy_action(policy_action)
                 .with_provenance(provenance)
-                .with_metadata(
-                    {
-                        "provider": self.model_provider.name,
-                        "claim_count": len(claims),
-                        "evidence_count": len(request.evidence),
-                        "instruction_count": len(request.instructions),
-                        "citation_count": len(request.citations),
-                        "tool_count": len(request.tool_executions),
-                    }
-                )
+                .with_usage_summary(summarize_usage(attempts))
+                .with_metadata(metadata)
                 .build()
             )
 
@@ -305,6 +350,7 @@ class Verifier:
         claims: list,
         claim_verifications: list[ClaimVerification],
         attempts: list[Attempt],
+        usage_budget_exceeded: bool = False,
     ) -> tuple[ResultStatus, OverallVerdict, AbstentionReason | None]:
         """Determine pipeline status, factual verdict, and abstention reason.
 
@@ -312,6 +358,13 @@ class Verifier:
         (independent of policy); this only decides whether the pipeline
         counts as COMPLETED or ABSTAINED and, if abstained, why.
         """
+        if usage_budget_exceeded:
+            # ADR-012: exceeding the per-request usage/cost ceiling abstains
+            # BUDGET_EXHAUSTED, the same as the pre-dispatch claim/evidence
+            # caps -- even though, unlike those, one or more real judge
+            # attempts already happened (preserved in provenance).
+            return ResultStatus.ABSTAINED, OverallVerdict.ABSTAIN, AbstentionReason.BUDGET_EXHAUSTED
+
         if not claims:
             return (
                 ResultStatus.ABSTAINED,
@@ -408,21 +461,39 @@ class Verifier:
         self,
         claims: list,
         evidence: list[Evidence],
-    ) -> tuple[list[ClaimVerification], list[Attempt], str | None, list[Violation]]:
+    ) -> tuple[list[ClaimVerification], list[Attempt], str | None, list[Violation], str | None]:
         """Verify all claims against evidence via one bounded JudgeProvider call each.
 
         Returns:
             Tuple of (claim verifications, judge attempts, calibration class
             shared by every attempt -- or None when there were no claims to
-            dispatch at all -- and violations raised by the judge-boundary
-            citation checks below).
+            dispatch at all -- violations raised by the judge-boundary
+            citation checks below, and a usage-budget violation reason if
+            the request's cumulative usage/cost exceeded its per-request
+            ceiling partway through -- either because a completed attempt's
+            real usage pushed it over (`check_usage_budget`, after
+            dispatch) or because dispatching one more call could not be
+            reserved against what remains (`check_usage_reservation`,
+            before dispatch) -- in which case any remaining claims were
+            never dispatched).
         """
         verifications: list[ClaimVerification] = []
         attempts: list[Attempt] = []
         citation_violations: list[Violation] = []
         calibration_class: str | None = None
+        usage_budget_violation: str | None = None
 
         for claim in claims:
+            reservation_violation = check_usage_reservation(summarize_usage(attempts))
+            if reservation_violation is not None:
+                usage_budget_violation = reservation_violation
+                logger.warning(
+                    "Usage budget reservation exceeded before dispatching claim %s: %s",
+                    claim.claim_id,
+                    reservation_violation,
+                )
+                break
+
             cancellation = CancellationToken()
             deadline = time.monotonic() + DEFAULT_JUDGE_TIMEOUT_SECONDS
             judge_request = JudgeRequest(claim=claim, evidence=evidence)
@@ -449,6 +520,7 @@ class Verifier:
             attempt_completed = datetime.now(timezone.utc)
 
             attempt_id = f"attempt_{uuid.uuid4().hex[:12]}"
+            usage = judge_result.usage or Usage()
 
             if citation_downgraded:
                 citation_violations.append(
@@ -516,6 +588,7 @@ class Verifier:
                         outcome=AttemptOutcome.COMPLETED,
                         started_at=attempt_started,
                         completed_at=attempt_completed,
+                        usage=usage,
                     )
                 )
             else:
@@ -549,12 +622,28 @@ class Verifier:
                         calibration_class=calibration_class,
                         outcome=AttemptOutcome.FAILED,
                         error=judge_result.error.code.value,
+                        usage=usage,
                         started_at=attempt_started,
                         completed_at=attempt_completed,
                     )
                 )
 
-        return verifications, attempts, calibration_class, citation_violations
+            usage_budget_violation = check_usage_budget(summarize_usage(attempts))
+            if usage_budget_violation is not None:
+                logger.warning(
+                    "Usage budget exceeded after claim %s: %s",
+                    claim.claim_id,
+                    usage_budget_violation,
+                )
+                break
+
+        return (
+            verifications,
+            attempts,
+            calibration_class,
+            citation_violations,
+            usage_budget_violation,
+        )
 
     def _evaluate_instructions(
         self,
