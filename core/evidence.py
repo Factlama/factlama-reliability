@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from schemas.claims import Claim, ClaimVerdict, RationaleCode
 from schemas.evidence import Evidence
+from schemas.tenancy import TenantContext
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,57 @@ class EvidenceMapper(ABC):
 
         Returns:
             MappingResult with verdict and supporting evidence IDs.
+        """
+        ...
+
+
+class EvidenceRetriever(ABC):
+    """Optional retrieval port (evidence-engine.md): "Retrieval is an
+    optional EvidenceRetriever port, called only when policy and tenant
+    authorization explicitly allow it. No vector database is an MVP
+    dependency."
+
+    MVP evidence comes from the request; this exists so a future retrieval
+    backend has a real interface to implement rather than a bespoke one
+    invented per integration. There is deliberately no concrete
+    implementation and no caller wiring it in yet -- there is no policy
+    field or tenant-authorization check to gate it on (that gate would be
+    new, unreviewed scope, not this interface). This mirrors
+    `core.repository.TenantAwareRepository`: a typed contract a future
+    implementation must satisfy, not a claim that retrieval itself works
+    today.
+    """
+
+    @abstractmethod
+    def retrieve(
+        self, tenant_context: TenantContext, claim: Claim, max_results: int
+    ) -> list[Evidence]:
+        """Return candidate evidence for a claim, or an empty list.
+
+        `tenant_context` is the authenticated identity CONTRACTS.md's
+        `EvidenceRetriever.retrieve(tenant_context, query, limits) ->
+        Evidence[]` requires: retrieval is never tenant-implicit, the same
+        rule `core.repository.TenantAwareRepository` already enforces for
+        storage. An implementation must scope its query -- and any
+        authorization check on what it returns -- to this context, never to
+        an ambient/global one; this is also the "policy and tenant
+        authorization explicitly allow it" gate evidence-engine.md requires
+        before retrieval runs at all.
+
+        Implementations must resolve any reference through an authorized
+        source before returning it; an unresolved reference is an
+        unavailable-evidence condition (evidence-engine.md), never a raised
+        exception. Candidate similarity is routing only, never a support
+        verdict -- the judge still decides support/contradiction.
+
+        Args:
+            tenant_context: Authenticated tenant identity to scope retrieval
+                and authorization to.
+            claim: The claim to find candidate evidence for.
+            max_results: Upper bound on returned candidates.
+
+        Returns:
+            Candidate evidence, most relevant first. May be empty.
         """
         ...
 
