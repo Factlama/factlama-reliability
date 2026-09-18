@@ -154,6 +154,17 @@ class PolicyEngine:
         effective_verdict = OverallVerdict.FAIL if force_fail else verdict
         action = self._determine_action(effective_verdict, policy)
 
+        # ADR-013: "a pattern-based scan over evidence content sets
+        # EVIDENCE_INJECTION_SUSPECTED and routes to HUMAN_REVIEW via
+        # policy." This is a dedicated routing rule, unlike TOOL_ERROR
+        # above: it never escalates the factual verdict (the verdict above
+        # was already reached independently of the injection attempt), it
+        # always routes the *action* to HUMAN_REVIEW so a human sees the
+        # attempt even when the verdict would otherwise default to PASS
+        # (e.g. injected text riding along with genuine support).
+        if any(v.code == "EVIDENCE_INJECTION_SUSPECTED" for v in all_violations):
+            action = PolicyAction.HUMAN_REVIEW
+
         return action, additional_violations
 
     def _determine_action(
