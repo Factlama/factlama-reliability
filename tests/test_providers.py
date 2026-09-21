@@ -92,6 +92,27 @@ class TestJudgeResultInvariants:
         result = JudgeResult(verdict=ClaimVerdict.UNSUPPORTED, evidence_ids=[])
         assert validate_judge_result(result, request) is result
 
+    def test_downgrade_to_invalid_response_preserves_usage(self) -> None:
+        """R4 of the 2026-09-21 re-audit: a provider's reported usage is
+        real work that happened regardless of whether its citation was
+        valid -- must not be silently discarded when downgrading."""
+        from schemas.verification import Cost, Usage
+
+        claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
+        request = JudgeRequest(claim=claim, evidence=[])
+        hallucinated = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence_ids=["doc_999"],
+            usage=Usage(total_tokens=12, cost=Cost(status="MEASURED", amount=0.01)),
+        )
+        validated = validate_judge_result(hallucinated, request)
+
+        assert validated.error is not None
+        assert validated.usage is not None
+        assert validated.usage.total_tokens == 12
+        assert validated.usage.cost.status == "MEASURED"
+        assert validated.usage.cost.amount == 0.01
+
 
 class TestCitationSupportCheck:
     """Tests for CONTRACTS.md's conservative, non-model overlap/support check.
@@ -154,6 +175,44 @@ class TestCitationSupportCheck:
         happen to share a word."""
         claim = Claim(claim_id="claim_001", text="The physician purchased an automobile.")
         evidence = Evidence(evidence_id="doc_1", content="The doctor bought a car.")
+        request = JudgeRequest(claim=claim, evidence=[evidence])
+        result = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence_ids=["doc_1"],
+        )
+
+        _, changed = apply_citation_support_check(result, request)
+
+        assert changed is False
+
+    def test_does_not_reject_unlisted_synonym_pair(self) -> None:
+        """R3 of the 2026-09-21 re-audit's exact reproduction: a legitimate
+        paraphrase using words not previously in the synonym table must not
+        be rejected either -- the fix adds this specific pair to the table
+        (closing this example) as well as a general common-root fallback
+        (`_share_common_root`) for morphological variants no finite table
+        will ever fully enumerate."""
+        claim = Claim(claim_id="claim_001", text="The infant is asleep.")
+        evidence = Evidence(evidence_id="doc_1", content="The baby is sleeping.")
+        request = JudgeRequest(claim=claim, evidence=[evidence])
+        result = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence_ids=["doc_1"],
+        )
+
+        _, changed = apply_citation_support_check(result, request)
+
+        assert changed is False
+
+    def test_does_not_reject_morphological_variant_outside_the_synonym_table(self) -> None:
+        """The common-root fallback (not the finite synonym table) is what
+        closes this one: claim/evidence content words after stopword
+        removal ({"costs", "increased", "significantly"} vs {"filing",
+        "shows", "significant", "increase"}) share zero exact tokens and
+        zero synonym-table entries -- only common roots
+        ("increas.../signific...")."""
+        claim = Claim(claim_id="claim_001", text="Costs increased significantly.")
+        evidence = Evidence(evidence_id="doc_1", content="The filing shows a significant increase.")
         request = JudgeRequest(claim=claim, evidence=[evidence])
         result = JudgeResult(
             verdict=ClaimVerdict.SUPPORTED,

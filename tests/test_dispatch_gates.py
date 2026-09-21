@@ -509,6 +509,7 @@ class TestVerifierLateProviderResult:
                 return JudgeResult(
                     verdict=ClaimVerdict.SUPPORTED,
                     evidence_ids=[request.evidence[0].evidence_id],
+                    usage=Usage(total_tokens=12, cost=Cost(status="MEASURED", amount=0.01)),
                 )
 
             @property
@@ -534,6 +535,12 @@ class TestVerifierLateProviderResult:
         assert result.provenance.attempts[0].error == "TIMEOUT"
         # Never a factual PASS built from a result the provider returned too late.
         assert result.verdict != OverallVerdict.PASS
+        # R4 of the 2026-09-21 re-audit: the work already happened and its
+        # usage/cost is real -- only the verdict is untrusted, not the
+        # accounting. Must not be silently discarded as UNAVAILABLE.
+        assert result.provenance.attempts[0].usage.total_tokens == 12
+        assert result.provenance.attempts[0].usage.cost.status == "MEASURED"
+        assert result.provenance.attempts[0].usage.cost.amount == 0.01
 
 
 class TestVerifierOverallRequestDeadline:

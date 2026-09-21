@@ -57,7 +57,11 @@ def _coerce_sample_count(value: object) -> int | None:
     if value is None or isinstance(value, bool):
         return None
     try:
-        numeric = float(value)
+        # `value` is deliberately `object` -- this function's whole job is
+        # accepting a report field of unknown shape -- so `float()` here is
+        # statically unsound by design; the immediately-following except
+        # is what actually makes it safe, not the type checker.
+        numeric = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
     if not math.isfinite(numeric) or numeric < 0 or numeric != int(numeric):
@@ -65,7 +69,7 @@ def _coerce_sample_count(value: object) -> int | None:
     return int(numeric)
 
 
-def _undersampled_labels(per_label: Mapping[str, Mapping[str, float | int | None]]) -> list[str]:
+def _undersampled_labels(per_label: Mapping[str, Mapping[str, object]]) -> list[str]:
     """Every ADR-018 label that is missing from `per_label`, has an invalid
     `n` (see `_coerce_sample_count`), or is below `ADR_018_MIN_LABEL_N`
     scored examples. Non-empty means the report does not cover all four
@@ -98,7 +102,9 @@ def _coerce_probability(value: object) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     try:
-        numeric = float(value)
+        # See `_coerce_sample_count`'s matching comment: `object` here is
+        # deliberate, and the except clause is the real safety net.
+        numeric = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
     if not math.isfinite(numeric) or not (0.0 <= numeric <= 1.0):
@@ -107,7 +113,7 @@ def _coerce_probability(value: object) -> float | None:
 
 
 def evaluate_agreement_thresholds(
-    per_label: Mapping[str, Mapping[str, float | int | None]],
+    per_label: Mapping[str, Mapping[str, object]],
 ) -> list[str]:
     """ADR-018's per-label precision/recall bar, applied to an agreement
     report's `per_label` section (`evaluator-agreement-harness.md`'s report
@@ -198,7 +204,7 @@ def report_agreement(
     *,
     dataset_version: str,
     adversarial_flips: int,
-    per_label: Mapping[str, Mapping[str, float | int | None]],
+    per_label: Mapping[str, Mapping[str, object]],
     held_out_hash: str,
     held_out_fixture_count: int,
     leakage_attested: bool,

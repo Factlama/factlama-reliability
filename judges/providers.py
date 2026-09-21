@@ -73,7 +73,12 @@ class MockModelProvider(JudgeProvider):
 
         for ev in evidence:
             ev_text = (ev.content or "").lower()
-            if claim_lower in ev_text or ev_text in claim_lower:
+            # An empty ev_text (no inline content, e.g. reference-only
+            # evidence) is vacuously "in" any claim_lower -- guard against
+            # treating unreadable evidence as a trivial match (F8 of the
+            # 2026-09-21 G0-G4 validation report, caught by
+            # core.conformance's malformed-response check).
+            if ev_text and (claim_lower in ev_text or ev_text in claim_lower):
                 supporting_ids.append(ev.evidence_id)
 
         if supporting_ids:

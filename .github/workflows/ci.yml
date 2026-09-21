@@ -14,10 +14,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # F10 of the 2026-09-21 G0-G4 validation report: this was previously
+      # unpinned (defaulting to factlama-architecture's own default branch
+      # HEAD at CI-run time), so the same reliability commit could validate
+      # against a different, possibly incompatible contracts/v0.1 revision
+      # on different days. Pinned to a known-compatible commit; bump this
+      # `ref` deliberately (in the same PR as any contract-affecting change)
+      # rather than letting it drift silently.
       - name: Checkout factlama-architecture (canonical contracts/v0.1 fixtures)
         uses: actions/checkout@v4
         with:
           repository: Factlama/factlama-architecture
+          ref: e2a022e8187e72708a224ac29d5cc8575b004af2
           path: factlama-architecture
 
       - uses: actions/setup-python@v5

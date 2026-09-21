@@ -143,10 +143,42 @@ class TestNLIProviderReal:
         assert result.verdict == ClaimVerdict.CONTRADICTED
         assert result.confidence > 0.9
 
-    def test_unrelated_claim_is_neutral(self, nli_provider: NLIProvider) -> None:
+    def test_unrelated_claim_is_unsupported(self, nli_provider: NLIProvider) -> None:
+        """NLI classifies this pair as neutral (neither entails nor
+        contradicts), same as a genuinely inconclusive on-topic pair -- but
+        this evidence is about a wholly different subject, not merely silent
+        on the claim's specifics. `_best_relatedness()`'s embedding-based
+        relatedness check (added for F8 of the 2026-09-21 G0-G4 validation
+        report) breaks that tie: UNSUPPORTED, not INSUFFICIENT_EVIDENCE. See
+        `NLIProvider._best_relatedness`'s own docstring for the reasoning and
+        `tests/fixtures/agreement/dev/irrelevant_evidence.json` for the
+        fixture family this mirrors.
+        """
         claim = Claim(claim_id="c3", text="Bananas are a good source of potassium.")
         evidence = [
             Evidence(evidence_id="doc_001", content="Company X was founded in 2018 in California.")
+        ]
+        result = nli_provider.evaluate(
+            JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()
+        )
+        assert result.verdict == ClaimVerdict.UNSUPPORTED
+
+    def test_on_topic_but_inconclusive_evidence_is_insufficient(
+        self, nli_provider: NLIProvider
+    ) -> None:
+        """The other side of the neutral tie `_best_relatedness()` breaks:
+        evidence about the *same* subject as the claim, but silent on the
+        specific assertion, stays INSUFFICIENT_EVIDENCE rather than being
+        reclassified as UNSUPPORTED -- mirrors
+        `tests/fixtures/agreement/dev/insufficient_evidence.json`'s bridge
+        fixture (relatedness ~0.42, above the 0.40 floor).
+        """
+        claim = Claim(claim_id="c3b", text="The bridge can safely support heavy trucks.")
+        evidence = [
+            Evidence(
+                evidence_id="doc_002",
+                content="Engineers inspected the bridge last spring as part of a routine maintenance schedule.",
+            )
         ]
         result = nli_provider.evaluate(
             JudgeRequest(claim=claim, evidence=evidence), FAR_DEADLINE, CancellationToken()

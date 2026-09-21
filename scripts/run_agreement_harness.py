@@ -48,16 +48,11 @@ import hashlib
 import json
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.provider_identity import (
-    configuration_fingerprint,
-    pinned_model_version,
-)
-from core.provider_identity import (
-    model_id as provider_model_id,
-)
+from core.provider_identity import configuration_fingerprint, full_pinned_model_id
 from core.qualification import evaluate_agreement_thresholds
 from judges.port import CancellationToken, JudgeProvider, JudgeRequest
 from judges.providers import MockModelProvider, RuleBasedProvider
@@ -210,6 +205,10 @@ def score_provider(
             "recall": recall,
             "f1": f1,
             "n": tp + fn,
+            # R7 of the 2026-09-21 re-audit: precision/recall/F1/n alone
+            # let a reviewer recompute the metrics but not audit the raw
+            # counts behind them -- export the confusion counts directly.
+            "confusion": {"tp": tp, "fp": fp, "fn": fn},
         }
 
     latencies_ms.sort()
@@ -222,14 +221,14 @@ def score_provider(
 
     threshold_failures = evaluate_agreement_thresholds(per_label)
 
-    # core.provider_identity: the same shared identity primitives the live
-    # Verifier now uses (F2 of the 2026-09-21 G0-G4 validation report), so a
-    # report's provider/model/config identity and a runtime attempt's are
-    # computed the same way, not two divergent implementations.
-    pinned_model_id = provider_model_id(provider)
-    resolved_revision = pinned_model_version(provider)
-    if pinned_model_id is not None and resolved_revision:
-        pinned_model_id = f"{pinned_model_id}@{resolved_revision}"
+    # core.provider_identity: the same shared identity primitive the live
+    # Verifier and scripts/run_qualification.py both use (F2 of the
+    # 2026-09-21 G0-G4 validation report; R1/R5 of the 2026-09-21
+    # re-audit), so a report's provider/model/config identity, a runtime
+    # attempt's, and the qualification registry's are all computed the
+    # same way -- never three divergent implementations that can silently
+    # disagree.
+    pinned_model_id = full_pinned_model_id(provider)
 
     return {
         "report_version": "0.1",
@@ -281,7 +280,13 @@ def _nli_provider() -> JudgeProvider:
 #: Factories, not instances -- embedding/nli are only imported (pulling in
 #: sentence-transformers/transformers/torch) when actually selected, so
 #: `--provider mock` or `--provider rule-based` never requires those extras.
-_PROVIDER_FACTORIES = {
+#: Explicitly typed as a common `Callable[[], JudgeProvider]`: a bare class
+#: reference (`MockModelProvider`) and a plain function
+#: (`_embedding_provider`) don't unify to a callable mypy can invoke without
+#: this annotation (mypy 2.3.1 otherwise infers the dict's value type as
+#: `object`, unreachable via the numpy-stub-parse fix for F10 of the
+#: 2026-09-21 G0-G4 validation report letting mypy finish this file at all).
+_PROVIDER_FACTORIES: dict[str, Callable[[], JudgeProvider]] = {
     "mock": MockModelProvider,
     "rule-based": RuleBasedProvider,
     "embedding": _embedding_provider,

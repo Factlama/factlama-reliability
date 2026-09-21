@@ -52,6 +52,8 @@ embeddings = [
 nli = [
     "transformers>=4.36.0",
     "torch>=2.1.0",
+    "sentence-transformers>=3.0.0",
+    "numpy>=1.24.0",
 ]
 all = [
     "sentence-transformers>=3.0.0",
@@ -104,7 +106,27 @@ known-first-party = ["schemas", "core", "judges", "api"]
 quote-style = "double"
 
 [tool.mypy]
-python_version = "3.10"
+# F10 of the 2026-09-21 G0-G4 validation report: this was "3.10" (this
+# project's actual `requires-python` floor) until numpy's installed stub
+# (numpy>=2.1, a transitive dependency of sentence-transformers, never
+# imported directly by this repo's own code) started using a PEP 695 `type`
+# statement mypy refuses to *parse* -- not type-check, parse -- under a
+# pre-3.12 target ("Type statement is only supported in Python 3.12 and
+# greater"), aborting the entire mypy run outright with no way to route
+# around it: neither `ignore_missing_imports` (numpy IS installed, never
+# "missing") nor `follow_imports = "skip"` on numpy/its importers prevents
+# mypy from still parsing an installed module's stub file when building the
+# import graph (confirmed by direct reproduction:
+# https://github.com/python/mypy issue-tracker territory, not a
+# misconfiguration on this repo's side), and mypy has no per-module
+# `python_version` override. Bumping the *mypy* target to 3.12 does not
+# relax this repo's actual `requires-python = ">=3.10"` support: mypy's
+# `python_version` only selects which syntax/typeshed mypy accepts while
+# type-checking, not what the 3.10/3.11/3.12 CI matrix's own real
+# interpreters execute -- a genuine 3.12-only construct in this repo's own
+# code would still fail immediately at collection time under the CI
+# matrix's 3.10 job, which remains the authoritative check for that.
+python_version = "3.12"
 plugins = ["pydantic.mypy"]
 warn_unused_configs = true
 warn_redundant_casts = true
@@ -116,10 +138,12 @@ check_untyped_defs = true
 # The embeddings/nli extras are optional; their vendor stubs are not required
 # for the default install, so unresolved imports there are expected, not an
 # error -- these modules are only reachable through judges/providers.py's
-# lazy _get_model() imports, never at module load time.
+# lazy _get_model() imports, never at module load time. Also keeps mypy from
+# deep-checking these large vendor stub packages themselves.
 [[tool.mypy.overrides]]
-module = ["sentence_transformers.*", "transformers.*", "torch.*"]
+module = ["sentence_transformers.*", "transformers.*", "torch.*", "numpy.*"]
 ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.importlinter]
 root_packages = ["schemas", "core", "judges", "api"]

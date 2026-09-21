@@ -30,7 +30,28 @@ def _contracts_dir() -> Path | None:
     return local if local.is_dir() else None
 
 
+def _running_in_ci() -> bool:
+    """GitHub Actions (and most other CI runners) set `CI=true`; skip is a
+    reasonable default for a contributor's local venv outside the three-repo
+    workspace, but F10 of the 2026-09-21 G0-G4 validation report: it must
+    not be reasonable in CI, where `FACTLAMA_CONTRACTS_DIR` is always meant
+    to be set (ci.yml checks out factlama-architecture as a sibling
+    specifically to feed it) -- a missing/broken checkout step there should
+    fail this required G2 acceptance gate loudly, not silently skip it."""
+    return os.environ.get("CI", "").lower() in ("1", "true") or bool(
+        os.environ.get("GITHUB_ACTIONS")
+    )
+
+
 CONTRACTS_DIR = _contracts_dir()
+
+if CONTRACTS_DIR is None and _running_in_ci():
+    raise RuntimeError(
+        "FACTLAMA_CONTRACTS_DIR is unset or invalid in a CI run. The contracts/v0.1 "
+        "fixture suite is a required G2 acceptance gate, not an optional local-dev "
+        "check -- refusing to silently skip it. This usually means the "
+        "'Checkout factlama-architecture' step in ci.yml failed or was removed."
+    )
 
 pytestmark = pytest.mark.skipif(
     CONTRACTS_DIR is None,

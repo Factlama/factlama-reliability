@@ -43,6 +43,59 @@ def pinned_model_version(provider: JudgeProvider) -> str | None:
     return getattr(provider, "resolved_revision", None)
 
 
+def full_pinned_model_id(provider: JudgeProvider) -> str | None:
+    """`model_id()` plus its resolved revision (`"<model>@<revision>"` when
+    available, bare `model_id()` otherwise), plus a `"+<secondary>@<rev>"`
+    suffix when the provider exposes a *second* decision-producing model
+    via the duck-typed `secondary_model_id`/`secondary_resolved_revision`
+    attributes (e.g. `NLIProvider`'s relatedness-check model, R1/R5 of the
+    2026-09-21 re-audit) -- so a composite evaluator whose verdicts depend
+    on two models cannot silently keep the identity of a single-model one.
+    `None` when the provider has no underlying model at all (Mock/
+    RuleBasedProvider).
+
+    This is the one place both the live report (`scripts/
+    run_agreement_harness.py`) and the qualification runner (`scripts/
+    run_qualification.py`) must compute a provider's pinned identity --
+    computing it twice, differently, is exactly how R1 of the re-audit
+    found the qualification runner silently discarding the resolved
+    revision the agreement report had already computed correctly.
+    """
+    base = model_id(provider)
+    if base is None:
+        return None
+    revision = pinned_model_version(provider)
+    pinned = f"{base}@{revision}" if revision else base
+
+    secondary_name = getattr(provider, "secondary_model_id", None)
+    if secondary_name:
+        secondary_revision = getattr(provider, "secondary_resolved_revision", None)
+        secondary = (
+            f"{secondary_name}@{secondary_revision}" if secondary_revision else secondary_name
+        )
+        pinned = f"{pinned}+{secondary}"
+    return pinned
+
+
+def is_fully_pinned(provider: JudgeProvider) -> bool:
+    """Whether every decision-producing model this provider's verdicts
+    depend on has resolved to an immutable revision. `True` for a provider
+    with no underlying model at all (Mock/RuleBasedProvider -- pinned by
+    construction, nothing to resolve); otherwise `False` if the primary
+    model's revision is unresolved, or if a secondary model
+    (`secondary_model_id`) is declared but its own
+    `secondary_resolved_revision` is unresolved. A qualification record
+    built from an unpinned identity must not default to `is_pinned=True`
+    (R1 of the 2026-09-21 re-audit).
+    """
+    if model_id(provider) is None:
+        return True
+    if pinned_model_version(provider) is None:
+        return False
+    secondary_name = getattr(provider, "secondary_model_id", None)
+    return not (secondary_name and getattr(provider, "secondary_resolved_revision", None) is None)
+
+
 def configuration_fingerprint(provider: JudgeProvider) -> str | None:
     """A real, non-fabricated identity signal for whatever tunable state the
     provider exposes as public instance attributes -- e.g. two

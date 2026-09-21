@@ -88,7 +88,20 @@ class TestScoreProvider:
             "recall": 1.0,
             "f1": 1.0,
             "n": 1,
+            "confusion": {"tp": 1, "fp": 0, "fn": 0},
         }
+
+    def test_per_label_confusion_counts_sum_to_n(self) -> None:
+        """R7 of the 2026-09-21 re-audit: a reviewer must be able to audit
+        the raw tp/fp/fn behind precision/recall/F1, not just recompute
+        them from numbers already derived from those same counts."""
+        report = score_provider(RuleBasedProvider(), dev_fixtures())
+        for label, metrics in report["per_label"].items():
+            confusion = metrics["confusion"]
+            assert confusion["tp"] + confusion["fn"] == metrics["n"], label
+            assert confusion["tp"] >= 0
+            assert confusion["fp"] >= 0
+            assert confusion["fn"] >= 0
 
     def test_adversarial_flip_is_counted_when_a_provider_trusts_injected_text(self) -> None:
         fixtures = [f for f in dev_fixtures() if f.family == "adversarial_injection"]

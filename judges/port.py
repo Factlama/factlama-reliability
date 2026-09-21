@@ -118,11 +118,15 @@ def validate_judge_result(result: JudgeResult, request: JudgeRequest) -> JudgeRe
 
     valid_evidence_ids = {e.evidence_id for e in request.evidence}
     if not result.evidence_ids or any(eid not in valid_evidence_ids for eid in result.evidence_ids):
+        # R4 of the 2026-09-21 re-audit: the provider's own reported usage
+        # is real regardless of whether its citation was valid -- preserve
+        # it on the downgraded result instead of discarding it.
         return JudgeResult(
             error=JudgeError(
                 code=JudgeErrorCode.INVALID_RESPONSE,
                 message="SUPPORTED verdict cites no evidence ID, or an evidence ID absent from the request",
-            )
+            ),
+            usage=result.usage,
         )
     return result
 
@@ -188,6 +192,13 @@ _CITATION_OVERLAP_SYNONYMS_V1: tuple[frozenset[str], ...] = (
     frozenset({"small", "tiny", "minor"}),
     frozenset({"increase", "increased", "rise", "rose", "grew", "grow", "growth"}),
     frozenset({"decrease", "decreased", "fall", "fell", "declined", "decline", "drop", "dropped"}),
+    #: R3 of the 2026-09-21 re-audit's exact reproduction ("The infant is
+    #: asleep." / "The baby is sleeping."): closes this specific example,
+    #: same as every group above -- see `_share_common_root()` below for
+    #: the *general*-mechanism improvement that same finding asked for,
+    #: since no finite table closes "the general issue."
+    frozenset({"infant", "infants", "baby", "babies"}),
+    frozenset({"asleep", "sleep", "sleeping", "slept"}),
 )
 
 _CITATION_OVERLAP_SYNONYM_CANONICAL: dict[str, str] = {
@@ -203,6 +214,48 @@ def _content_words(text: str) -> set[str]:
         w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in _CITATION_OVERLAP_STOPWORDS
     }
     return {_CITATION_OVERLAP_SYNONYM_CANONICAL.get(w, w) for w in tokens}
+
+
+def _share_common_root(word_a: str, word_b: str) -> bool:
+    """R3 of the 2026-09-21 re-audit: a finite synonym table only ever
+    closes the specific pairs someone thought to add -- "absence of
+    recognized lexical overlap alone" must not be the only path to a
+    downgrade. This is the general-mechanism generalization: a cheap,
+    deterministic morphological-variant detector (no real stemmer, no ML
+    model -- ADR-004 forbids a vendor SDK in this module) that treats two
+    words as related when they share a long common prefix relative to
+    their length, e.g. "increase"/"increasing", "support"/"supported".
+    Both an absolute floor (>= 5 shared characters) and a relative floor
+    (>= 60% of the shorter word) are required so short/coincidental
+    prefixes (e.g. "cat"/"car") don't count. This does not, and cannot,
+    catch genuinely unrelated word pairs with no shared root at all (e.g.
+    "infant"/"baby") -- that class of true synonymy has no lexical signal
+    to exploit without world knowledge, and is why the synonym table above
+    still exists alongside this, not instead of it.
+    """
+    if word_a == word_b:
+        return True
+    shorter = min(len(word_a), len(word_b))
+    if shorter < 4:
+        return False
+    common = 0
+    for a, b in zip(word_a, word_b, strict=False):
+        if a != b:
+            break
+        common += 1
+    return common >= 5 and common >= 0.6 * shorter
+
+
+def _words_are_related(claim_words: set[str], evidence_words: set[str]) -> bool:
+    """Exact/synonym-canonicalized overlap first (cheap), then the
+    common-root fallback for any pair that didn't already match."""
+    if claim_words & evidence_words:
+        return True
+    return any(
+        _share_common_root(claim_word, evidence_word)
+        for claim_word in claim_words
+        for evidence_word in evidence_words
+    )
 
 
 def apply_citation_support_check(
@@ -233,7 +286,7 @@ def apply_citation_support_check(
 
     evidence_by_id = {e.evidence_id: e for e in request.evidence}
     has_support = any(
-        claim_words & _content_words(evidence_by_id[eid].content or "")
+        _words_are_related(claim_words, _content_words(evidence_by_id[eid].content or ""))
         for eid in result.evidence_ids
         if eid in evidence_by_id
     )

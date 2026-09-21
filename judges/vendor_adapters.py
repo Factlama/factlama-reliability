@@ -318,6 +318,8 @@ class NLIProvider(JudgeProvider):
         self,
         model_name: str = "typeform/distilbert-base-uncased-mnli",
         device: str | None = None,
+        relatedness_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        relatedness_threshold: float = 0.40,
     ) -> None:
         """Initialize the NLI provider.
 
@@ -329,12 +331,28 @@ class NLIProvider(JudgeProvider):
                 `AutoModelForSequenceClassification` would attach a randomly
                 initialized classification head to it.
             device: Device to run the model on.
+            relatedness_model_name: Sentence-embedding model used only to
+                break the NLI "neutral" tie between UNSUPPORTED and
+                INSUFFICIENT_EVIDENCE (see `_best_relatedness`).
+            relatedness_threshold: Cosine-similarity floor below which
+                neutral-verdict evidence is treated as topically unrelated to
+                the claim (UNSUPPORTED) rather than genuinely inconclusive
+                (INSUFFICIENT_EVIDENCE). 0.40 was chosen against this repo's
+                public dev fixtures only (`tests/fixtures/agreement/dev/
+                irrelevant_evidence.json` tops out at 0.394 similarity;
+                `insufficient_evidence.json` starts at 0.420) -- the
+                FactLama-held-out set was checked afterward for confirmation,
+                not used to pick this number, per evaluator-agreement-
+                harness.md's leakage-control intent.
         """
         self.model_name = model_name
         self.device = device
+        self.relatedness_model_name = relatedness_model_name
+        self.relatedness_threshold = relatedness_threshold
         self._tokenizer: Any = None
         self._model: Any = None
         self._label_indices: dict[str, int] | None = None
+        self._relatedness_model: Any = None
 
     @property
     def name(self) -> str:
@@ -350,8 +368,44 @@ class NLIProvider(JudgeProvider):
             return None
         return getattr(self._model.config, "_commit_hash", None)
 
+    @property
+    def secondary_model_id(self) -> str | None:
+        """R5 of the 2026-09-21 re-audit: this evaluator's verdicts depend
+        on *two* models (the primary NLI classifier, and the relatedness
+        model that breaks its neutral tie), so its identity must name both
+        -- `core.provider_identity.full_pinned_model_id()` looks for this
+        exact attribute name."""
+        return self.relatedness_model_name
+
+    @property
+    def secondary_resolved_revision(self) -> str | None:
+        """The relatedness model's own resolved commit, once loaded --
+        mirrors `EmbeddingProvider.resolved_revision`'s exact introspection
+        (the relatedness model *is* a `SentenceTransformer`), since
+        `_get_relatedness_model()` always loads one."""
+        if self._relatedness_model is None:
+            return None
+        try:
+            config = self._relatedness_model[0].auto_model.config
+        except (IndexError, AttributeError, KeyError):
+            return None
+        return getattr(config, "_commit_hash", None)
+
     def _get_model(self) -> tuple[Any, Any]:
-        """Lazy-load the NLI model, tokenizer, and its entailment/neutral/contradiction label mapping."""
+        """Lazy-load the NLI model, tokenizer, its entailment/neutral/
+        contradiction label mapping, and (R5 of the 2026-09-21 re-audit)
+        the relatedness model too -- eagerly, together, not only the first
+        time a neutral verdict actually needs `_best_relatedness()`. This
+        evaluator's identity depends on both models regardless of which
+        fixture happens to land in NLI's neutral bucket first, so both must
+        be loaded (and therefore identifiable) before `evaluate()` ever
+        returns a result a caller might treat as final. A relatedness-model
+        load failure now surfaces the same way a primary-model failure
+        already does -- a `CONFIGURATION` `JudgeError` from `evaluate()`,
+        not a silent fallback to the old, less-accurate neutral mapping
+        while still claiming this composite evaluator's benchmarked
+        identity.
+        """
         if self._model is None:
             try:
                 import torch
@@ -374,6 +428,7 @@ class NLIProvider(JudgeProvider):
             # mapping must be read from the model's own config rather than
             # assumed by position.
             self._label_indices = self._resolve_label_indices(self._model.config.id2label)
+            self._get_relatedness_model()
         return self._tokenizer, self._model
 
     def _resolve_label_indices(self, id2label: dict) -> dict[str, int]:
@@ -407,6 +462,64 @@ class NLIProvider(JudgeProvider):
                 f"missing: {sorted(missing)}. Use a model fine-tuned for 3-way NLI."
             )
         return indices
+
+    def _get_relatedness_model(self) -> Any:
+        """Lazy-load the sentence-embedding model used to break NLI's
+        neutral tie (see `_best_relatedness`)."""
+        if self._relatedness_model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                self._relatedness_model = SentenceTransformer(
+                    self.relatedness_model_name, device=self.device
+                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    "sentence-transformers is required for NLIProvider's neutral-verdict "
+                    "disambiguation. Install with: pip install factlama-reliability[nli]"
+                ) from exc
+        return self._relatedness_model
+
+    def _best_relatedness(self, claim_text: str, evidence: list[Any]) -> float:
+        """Best cosine similarity between the claim and any evidence item's
+        content. `_get_model()` always loads the relatedness model eagerly
+        alongside the primary NLI model (R5 of the 2026-09-21 re-audit), so
+        by the time `evaluate()` reaches this call the model is already
+        loaded -- a load failure surfaces earlier, from `_get_model()`
+        itself, as a `CONFIGURATION` error, rather than a silent fallback
+        here.
+
+        NLI's own entailment/contradiction/neutral distribution does not
+        distinguish "evidence about something else entirely" (expected
+        UNSUPPORTED, e.g. "Paris Hilton" evidence for a "Paris is the
+        capital of France" claim) from "evidence on-topic but genuinely
+        silent on the claim's specific assertion" (expected
+        INSUFFICIENT_EVIDENCE, e.g. a bridge-inspection report for a
+        load-bearing-capacity claim) -- both land near-100% neutral with
+        this model. Raw lexical overlap doesn't separate them either (both
+        families are hand-authored to share surface words). Semantic
+        similarity does: probed against this repo's own fixtures, the
+        irrelevant_evidence family tops out at 0.394 cosine similarity and
+        insufficient_evidence starts at 0.420 -- see
+        `relatedness_threshold`'s own docstring for how that number was
+        chosen.
+        """
+        model = self._get_relatedness_model()
+
+        import torch.nn.functional as F
+
+        claim_embedding = model.encode(claim_text, convert_to_tensor=True)
+        best = 0.0
+        for ev in evidence:
+            ev_text = ev.content or ""
+            if not ev_text:
+                continue
+            ev_embedding = model.encode(ev_text, convert_to_tensor=True)
+            similarity = F.cosine_similarity(
+                claim_embedding.unsqueeze(0), ev_embedding.unsqueeze(0)
+            ).item()
+            best = max(best, similarity)
+        return best
 
     def evaluate(
         self,
@@ -490,11 +603,24 @@ class NLIProvider(JudgeProvider):
             reason = f"Evidence contradicts claim (contradiction: {max_contradiction:.2f})"
             confidence = max_contradiction
         else:
-            verdict = ClaimVerdict.INSUFFICIENT_EVIDENCE
-            evidence_ids = []
-            rationale_code = RationaleCode.AMBIGUOUS_EVIDENCE
-            reason = f"NLI classification neutral (entailment: {max_entailment:.2f}, contradiction: {max_contradiction:.2f})"
-            confidence = max(neutral_scores) if neutral_scores else 0.5
+            best_relatedness = self._best_relatedness(claim.text, evidence)
+            if best_relatedness < self.relatedness_threshold:
+                verdict = ClaimVerdict.UNSUPPORTED
+                evidence_ids = []
+                rationale_code = RationaleCode.NO_SUPPORT
+                reason = (
+                    f"NLI classification neutral (entailment: {max_entailment:.2f}, "
+                    f"contradiction: {max_contradiction:.2f}) and evidence is not "
+                    f"topically related to the claim (relatedness: {best_relatedness:.2f} "
+                    f"< {self.relatedness_threshold})"
+                )
+                confidence = 1.0 - best_relatedness
+            else:
+                verdict = ClaimVerdict.INSUFFICIENT_EVIDENCE
+                evidence_ids = []
+                rationale_code = RationaleCode.AMBIGUOUS_EVIDENCE
+                reason = f"NLI classification neutral (entailment: {max_entailment:.2f}, contradiction: {max_contradiction:.2f})"
+                confidence = max(neutral_scores) if neutral_scores else 0.5
 
         return JudgeResult(
             verdict=verdict,

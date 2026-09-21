@@ -617,11 +617,16 @@ class Verifier:
                     self.model_provider.name,
                     claim.claim_id,
                 )
+                # R4 of the 2026-09-21 re-audit: the work already happened
+                # and any usage/cost it incurred is real and known -- only
+                # the verdict is untrusted, not the accounting. Preserve it
+                # on the typed failure rather than discarding it.
                 judge_result = JudgeResult(
                     error=JudgeError(
                         code=JudgeErrorCode.TIMEOUT,
                         message="provider returned a result after its deadline",
-                    )
+                    ),
+                    usage=judge_result.usage,
                 )
             # Read after `evaluate()`: a vendor adapter's resolved model
             # revision is only available once its model has actually loaded
