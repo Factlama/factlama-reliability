@@ -199,6 +199,20 @@ _CITATION_OVERLAP_SYNONYMS_V1: tuple[frozenset[str], ...] = (
     #: since no finite table closes "the general issue."
     frozenset({"infant", "infants", "baby", "babies"}),
     frozenset({"asleep", "sleep", "sleeping", "slept"}),
+    #: Follow-up re-audit finding (2026-09-21), same reproduction shape as
+    #: R3 above with a *different* unrelated-root pair ("The hound fled."
+    #: / "The dog ran away."). Unlike R3's "infant"/"baby", "hound"/"dog"
+    #: and "flee"/"run" share no common root either, so no deterministic
+    #: mechanism in this file will ever generalize past enumerating pairs
+    #: like this one -- see `_share_common_root()`'s docstring for why an
+    #: unlisted pair like this no longer needs to be *caught* here at all
+    #: for CONTRACTS.md compliance: `apply_citation_support_check()` no
+    #: longer downgrades a verdict on this table's absence, only flags for
+    #: human review. This entry exists to reduce that review load, not to
+    #: satisfy the contract -- the contract is satisfied unconditionally,
+    #: table coverage or not.
+    frozenset({"hound", "hounds", "dog", "dogs"}),
+    frozenset({"flee", "flees", "fled", "fleeing", "run", "runs", "ran", "running"}),
 )
 
 _CITATION_OVERLAP_SYNONYM_CANONICAL: dict[str, str] = {
@@ -229,9 +243,30 @@ def _share_common_root(word_a: str, word_b: str) -> bool:
     (>= 60% of the shorter word) are required so short/coincidental
     prefixes (e.g. "cat"/"car") don't count. This does not, and cannot,
     catch genuinely unrelated word pairs with no shared root at all (e.g.
-    "infant"/"baby") -- that class of true synonymy has no lexical signal
-    to exploit without world knowledge, and is why the synonym table above
-    still exists alongside this, not instead of it.
+    "infant"/"baby", "hound"/"dog") -- that class of true synonymy has no
+    lexical signal to exploit without world knowledge, and is why the
+    synonym table above still exists alongside this, not instead of it.
+
+    What this table/fallback pair is, and is not, responsible for (revised
+    after a second re-audit follow-up, 2026-09-21, which found that an
+    earlier version of this note tried to excuse a real contract violation
+    by calling it a "permanent, accepted limitation" -- that framing was
+    wrong: CONTRACTS.md was never amended, and a docstring cannot amend
+    it). Between them, the synonym table and this fallback only recognize
+    pairs someone has enumerated or that share a morphological root -- a
+    legitimate paraphrase using entirely unrelated words neither party has
+    ever added is still lexically indistinguishable from a genuinely
+    fabricated citation, and *that gap is real and permanent* for this
+    deterministic, ADR-004-constrained module (no vendor SDK, so no real
+    semantic-relatedness signal is available here). What changed is what
+    that gap is allowed to decide: `apply_citation_support_check()` no
+    longer treats "not in this table" as grounds to override a SUPPORTED
+    verdict at all (see its own docstring) -- it only decides whether to
+    flag the citation for mandatory human review. So an unlisted pair like
+    a future "hound"/"dog" no longer risks incorrectly rejecting a
+    legitimate paraphrase; at worst it costs one avoidable human review.
+    Growing this table only trades review load for coverage; it is no
+    longer what stands between this module and a contract violation.
     """
     if word_a == word_b:
         return True
@@ -266,16 +301,42 @@ def apply_citation_support_check(
     SUPPORTED verdict's cited evidence.
 
     This runs after `validate_judge_result()` has already rejected a
-    nonexistent evidence ID as INVALID_RESPONSE; here every cited ID is real,
-    but a judge can still confidently cite genuine evidence that has nothing
-    to do with the claim. Deliberately weak: it only downgrades when a claim
-    and every one of its cited evidence texts share *zero* non-trivial
-    content words -- a clearly fabricated citation, not merely a paraphrase.
-    "Lexical overlap alone is never proof, and legitimate paraphrase is not
-    rejected solely for lacking shared words" (CONTRACTS.md), so any nonzero
-    overlap passes unchanged.
+    nonexistent evidence ID as INVALID_RESPONSE; here every cited ID is real.
+    Behavior change from an earlier version (re-audit follow-up, 2026-09-21,
+    "revise the guard's decision rule so absence of recognized lexical
+    overlap alone does not establish lack of support"): this check used to
+    downgrade the verdict itself to INSUFFICIENT_EVIDENCE whenever a claim
+    and every one of its cited evidence texts shared *zero* non-trivial
+    content words. That directly violated CONTRACTS.md's own "legitimate
+    paraphrase is not rejected solely for lacking shared words" for any
+    paraphrase pair sharing no root and not in `_CITATION_OVERLAP_SYNONYMS_V1`
+    -- a real, reproduced failure mode (`_share_common_root()`'s own
+    docstring explains why no finite lexical mechanism can close this
+    generally), not a hypothetical one. Zero recognized overlap is genuinely
+    ambiguous: it is exactly as consistent with "legitimate paraphrase this
+    guard's vocabulary doesn't yet cover" as with "fabricated citation," and
+    this non-model, vendor-neutral port (ADR-004) has no way to tell those
+    apart on its own.
 
-    Returns the (possibly downgraded) result and whether it downgraded.
+    This check no longer guesses. It never overrides the judge's own
+    (possibly semantically-informed, e.g. `NLIProvider`'s embedding-based
+    relatedness check) SUPPORTED verdict -- the returned `JudgeResult` is
+    always the input unchanged. What it still does, unchanged from before:
+    detect the same "clearly fabricated citation" signal (exact overlap,
+    then the versioned synonym table, then the common-root fallback), and
+    report whether that signal fired. The caller (`core.verifier`) still
+    raises "a reason and violation" for a firing exactly as CONTRACTS.md
+    requires -- it now routes that violation to mandatory human review
+    (the same `PolicyAction.HUMAN_REVIEW`-forcing pattern ADR-013 already
+    uses for `EVIDENCE_INJECTION_SUSPECTED`) instead of silently mutating
+    the factual verdict either direction. `core.policy`'s own docstring:
+    "Factual verdict is computed independently of policy action" -- this
+    guard now actually honors that separation instead of being the one
+    place in the pipeline that didn't.
+
+    Returns `(result, overlap_inconclusive)`: `result` is always `request`'s
+    input `result`, never modified; `overlap_inconclusive` is `True` when no
+    cited evidence shares any recognized overlap with the claim.
     """
     if result.error is not None or result.verdict != ClaimVerdict.SUPPORTED:
         return result, False
@@ -290,17 +351,7 @@ def apply_citation_support_check(
         for eid in result.evidence_ids
         if eid in evidence_by_id
     )
-    if has_support:
-        return result, False
-
-    downgraded = result.model_copy(
-        update={
-            "verdict": ClaimVerdict.INSUFFICIENT_EVIDENCE,
-            "rationale_code": RationaleCode.CITATION_UNSUPPORTED,
-            "reason": "Cited evidence shares no content with the claim (conservative overlap check failed)",
-        }
-    )
-    return downgraded, True
+    return result, not has_support
 
 
 _INJECTION_PATTERNS = [

@@ -29,21 +29,27 @@ pass casually. It only accepts a JSON file recording who attested and when
 treat its mere existence as satisfying that requirement"), e.g.:
 
     {"attested_by": "<repository owner's name>", "date": "2026-09-21",
-     "dataset_version": "harness-0.1", "held_out_hash": "<sha256 this
-     run's --held-out-dir actually hashes to>", "dev_fixture_count": 24,
-     "held_out_fixture_count": 16,
+     "dataset_version": "harness-0.1", "dev_hash": "<sha256 this run's
+     public tests/fixtures/agreement/dev/ actually hashes to>",
+     "held_out_hash": "<sha256 this run's --held-out-dir actually hashes
+     to>", "dev_fixture_count": 24, "held_out_fixture_count": 16,
      "note": "reviewed factlama-private/agreement-held-out/held_out.json
      for leakage against the public dev set"}
 
-R6 of the 2026-09-21 re-audit: the four identity fields
-(`dataset_version`/`held_out_hash`/`dev_fixture_count`/
+R6 of the 2026-09-21 re-audit: the five identity fields
+(`dataset_version`/`dev_hash`/`held_out_hash`/`dev_fixture_count`/
 `held_out_fixture_count`) must exactly match the run this file is passed
 to -- a genuine attestation from an earlier release is refused, not
-silently accepted, if the dataset has since changed. Run once without
-`--leakage-attestation-file` first to read the actual `held_out_hash` this
-tool computes for your `--held-out-dir` (in the JSON report's own
-`held_out_hash` field) before a human reviewer writes the attestation file
-referencing it.
+silently accepted, if the dataset has since changed. Follow-up re-audit
+finding (2026-09-21, "leakage attestation is only partially
+dataset-bound"): `dev_hash` closes the gap where public fixture *content*
+could be edited without changing `dev_fixture_count`, silently preserving
+approval even though leakage review compares both the public and
+held-out sets, not just their sizes. Run once without
+`--leakage-attestation-file` first to read the actual `dev_hash`/
+`held_out_hash` this tool computes (in the JSON report's own `dev_hash`/
+`held_out_hash` fields) before a human reviewer writes the attestation
+file referencing them.
 
 Run with:
     python scripts/run_qualification.py --provider nli \\
@@ -81,7 +87,8 @@ from schemas.verification import QualificationStatus
 from scripts.run_agreement_harness import (
     _PROVIDER_FACTORIES,
     DATASET_VERSION,
-    _held_out_content_hash,
+    DEV_FIXTURES_DIR,
+    _fixture_dir_content_hash,
     dev_fixtures,
     held_out_fixtures,
     score_provider,
@@ -92,6 +99,7 @@ def _load_leakage_attestation(
     path: Path | None,
     *,
     dataset_version: str,
+    dev_hash: str,
     held_out_hash: str,
     dev_fixture_count: int,
     held_out_fixture_count: int,
@@ -99,8 +107,8 @@ def _load_leakage_attestation(
     """`(leakage_attested, attestation_record)`. `leakage_attested` is only
     ever `True` when `path` names a real, readable file whose
     `attested_by`/`date` are non-empty **and** whose `dataset_version`/
-    `held_out_hash`/`dev_fixture_count`/`held_out_fixture_count` fields
-    exactly match the run actually being reported on.
+    `dev_hash`/`held_out_hash`/`dev_fixture_count`/`held_out_fixture_count`
+    fields exactly match the run actually being reported on.
 
     R6 of the 2026-09-21 re-audit: a genuine attestation from a prior
     release must not silently approve a since-modified dataset -- without
@@ -109,6 +117,15 @@ def _load_leakage_attestation(
     held-out set it once reviewed still matches the one this run just
     scored against. This function never fabricates a match; it only
     compares and refuses on any mismatch.
+
+    Follow-up re-audit finding (2026-09-21): the held-out set was bound by
+    content hash, but the public dev set was only bound by fixture
+    *count* -- editing existing public fixture content (without adding or
+    removing one) left `dev_fixture_count` unchanged, so a stale
+    attestation would still match even though leakage review compares
+    both sets' actual content, not just the held-out side's. `dev_hash`
+    closes that gap the same way `held_out_hash` already closes it for
+    the held-out set.
 
     `attestation_record` (when attested) carries a sha256 of the
     attestation file's own bytes, so the report itself preserves a
@@ -132,6 +149,11 @@ def _load_leakage_attestation(
         mismatches.append(
             f"dataset_version: attestation has {data.get('dataset_version')!r}, "
             f"this run is {dataset_version!r}"
+        )
+    if data.get("dev_hash") != dev_hash:
+        mismatches.append(
+            f"dev_hash: attestation has {data.get('dev_hash')!r}, "
+            f"this run's public dev set hashes to {dev_hash!r}"
         )
     if data.get("held_out_hash") != held_out_hash:
         mismatches.append(
@@ -179,10 +201,10 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Path to a JSON file recording a real human leakage-control review "
-        "(attested_by, date, dataset_version, held_out_hash, dev_fixture_count, "
-        "held_out_fixture_count -- refused if any dataset-identity field doesn't "
-        "match this run). Omit unless that review has actually happened -- see "
-        "this script's own module docstring.",
+        "(attested_by, date, dataset_version, dev_hash, held_out_hash, "
+        "dev_fixture_count, held_out_fixture_count -- refused if any "
+        "dataset-identity field doesn't match this run). Omit unless that review "
+        "has actually happened -- see this script's own module docstring.",
     )
     parser.add_argument("--out", type=argparse.FileType("w"), default=sys.stdout)
     args = parser.parse_args(argv)
@@ -225,13 +247,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     record = mark_conformance_passed(record)
 
+    # Bound the same way as held_out_hash below (R6 of the 2026-09-21
+    # re-audit's follow-up finding): editing existing public fixture
+    # *content* without changing fixture count must still invalidate a
+    # stale attestation, since leakage review compares both sets' actual
+    # content, not just the held-out side's.
+    dev_hash = _fixture_dir_content_hash(DEV_FIXTURES_DIR)
     fixtures = dev_fixtures()
     held_out_hash = ""
     held_out_count = 0
     if args.held_out_dir is not None:
         ho_fixtures = held_out_fixtures(args.held_out_dir)
         fixtures = fixtures + ho_fixtures
-        held_out_hash = _held_out_content_hash(args.held_out_dir)
+        held_out_hash = _fixture_dir_content_hash(args.held_out_dir)
         held_out_count = len(ho_fixtures)
 
     # R1: no longer overwritten with the record's fields below -- both are
@@ -256,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     leakage_attested, attestation_record = _load_leakage_attestation(
         args.leakage_attestation_file,
         dataset_version=DATASET_VERSION,
+        dev_hash=dev_hash,
         held_out_hash=held_out_hash,
         dev_fixture_count=len(dev_fixtures()),
         held_out_fixture_count=held_out_count,
@@ -328,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         "dev": len(dev_fixtures()),
         "held_out": held_out_count,
     }
+    report["dev_hash"] = dev_hash
     if held_out_hash:
         report["held_out_hash"] = held_out_hash
     # R6: preserved in the report itself, not only printed to stderr, so a

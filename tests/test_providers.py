@@ -119,11 +119,18 @@ class TestCitationSupportCheck:
 
     This runs after validate_judge_result() has already rejected a
     nonexistent evidence ID -- every case here cites real evidence.
+
+    Re-audit follow-up (2026-09-21): this check no longer overrides the
+    verdict (see `apply_citation_support_check()`'s own docstring for why
+    zero recognized overlap alone is not proof of a fabricated citation) --
+    `result` returned is always the exact input, and the bool return is
+    whether the caller should flag the citation as overlap-inconclusive for
+    mandatory human review, not whether the verdict changed.
     """
 
-    def test_downgrades_supported_verdict_with_no_shared_content(self) -> None:
-        """A SUPPORTED verdict citing real evidence that is unrelated to the claim must not
-        be trusted as-is."""
+    def test_flags_supported_verdict_with_no_shared_content(self) -> None:
+        """A SUPPORTED verdict citing real evidence that is unrelated to the claim is
+        flagged as overlap-inconclusive, but its verdict is not overridden."""
         claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
         evidence = Evidence(evidence_id="doc_1", content="The weather today is sunny and warm.")
         request = JudgeRequest(claim=claim, evidence=[evidence])
@@ -132,14 +139,14 @@ class TestCitationSupportCheck:
             evidence_ids=["doc_1"],
         )
 
-        downgraded, changed = apply_citation_support_check(result, request)
+        unchanged, overlap_inconclusive = apply_citation_support_check(result, request)
 
-        assert changed is True
-        assert downgraded.verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE
-        assert downgraded.error is None
+        assert overlap_inconclusive is True
+        assert unchanged is result
+        assert unchanged.verdict == ClaimVerdict.SUPPORTED
 
     def test_passes_through_supported_verdict_with_shared_content(self) -> None:
-        """Matching evidence is left untouched."""
+        """Matching evidence is left untouched and not flagged."""
         claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")
         evidence = Evidence(evidence_id="doc_1", content="Company X was founded in 2018.")
         request = JudgeRequest(claim=claim, evidence=[evidence])
@@ -148,13 +155,13 @@ class TestCitationSupportCheck:
             evidence_ids=["doc_1"],
         )
 
-        unchanged, changed = apply_citation_support_check(result, request)
+        unchanged, overlap_inconclusive = apply_citation_support_check(result, request)
 
-        assert changed is False
+        assert overlap_inconclusive is False
         assert unchanged is result
 
-    def test_does_not_reject_legitimate_paraphrase_with_partial_overlap(self) -> None:
-        """Low but nonzero overlap must not be rejected -- CONTRACTS.md: "legitimate
+    def test_does_not_flag_legitimate_paraphrase_with_partial_overlap(self) -> None:
+        """Low but nonzero overlap must not be flagged -- CONTRACTS.md: "legitimate
         paraphrase is not rejected solely for lacking shared words"."""
         claim = Claim(claim_id="claim_001", text="The firm began operations in 2018.")
         evidence = Evidence(evidence_id="doc_1", content="Company X was founded in the year 2018.")
@@ -164,15 +171,15 @@ class TestCitationSupportCheck:
             evidence_ids=["doc_1"],
         )
 
-        _, changed = apply_citation_support_check(result, request)
+        _, overlap_inconclusive = apply_citation_support_check(result, request)
 
-        assert changed is False
+        assert overlap_inconclusive is False
 
-    def test_does_not_reject_legitimate_paraphrase_with_zero_raw_token_overlap(self) -> None:
+    def test_does_not_flag_legitimate_paraphrase_with_zero_raw_token_overlap(self) -> None:
         """F7 of the 2026-09-21 G0-G4 validation report's exact reproduction:
         a claim and its cited evidence sharing *zero* raw tokens must still
-        pass when they are recognized near-synonyms, not just when they
-        happen to share a word."""
+        pass unflagged when they are recognized near-synonyms, not just when
+        they happen to share a word."""
         claim = Claim(claim_id="claim_001", text="The physician purchased an automobile.")
         evidence = Evidence(evidence_id="doc_1", content="The doctor bought a car.")
         request = JudgeRequest(claim=claim, evidence=[evidence])
@@ -181,14 +188,14 @@ class TestCitationSupportCheck:
             evidence_ids=["doc_1"],
         )
 
-        _, changed = apply_citation_support_check(result, request)
+        _, overlap_inconclusive = apply_citation_support_check(result, request)
 
-        assert changed is False
+        assert overlap_inconclusive is False
 
-    def test_does_not_reject_unlisted_synonym_pair(self) -> None:
+    def test_does_not_flag_unlisted_synonym_pair(self) -> None:
         """R3 of the 2026-09-21 re-audit's exact reproduction: a legitimate
         paraphrase using words not previously in the synonym table must not
-        be rejected either -- the fix adds this specific pair to the table
+        be flagged either -- the fix adds this specific pair to the table
         (closing this example) as well as a general common-root fallback
         (`_share_common_root`) for morphological variants no finite table
         will ever fully enumerate."""
@@ -200,11 +207,11 @@ class TestCitationSupportCheck:
             evidence_ids=["doc_1"],
         )
 
-        _, changed = apply_citation_support_check(result, request)
+        _, overlap_inconclusive = apply_citation_support_check(result, request)
 
-        assert changed is False
+        assert overlap_inconclusive is False
 
-    def test_does_not_reject_morphological_variant_outside_the_synonym_table(self) -> None:
+    def test_does_not_flag_morphological_variant_outside_the_synonym_table(self) -> None:
         """The common-root fallback (not the finite synonym table) is what
         closes this one: claim/evidence content words after stopword
         removal ({"costs", "increased", "significantly"} vs {"filing",
@@ -219,14 +226,35 @@ class TestCitationSupportCheck:
             evidence_ids=["doc_1"],
         )
 
-        _, changed = apply_citation_support_check(result, request)
+        _, overlap_inconclusive = apply_citation_support_check(result, request)
 
-        assert changed is False
+        assert overlap_inconclusive is False
 
-    def test_still_downgrades_when_no_synonym_relates_the_two(self) -> None:
+    def test_does_not_flag_unrelated_root_synonym_pair(self) -> None:
+        """Follow-up re-audit finding (2026-09-21): "The hound fled."
+        supported by "The dog ran away." -- a legitimate paraphrase with
+        zero shared roots, distinct from R3's "infant"/"baby" example.
+        Closed here the same way R3 was (an added table entry); this guard
+        cannot generalize past enumerated/morphological pairs without a
+        semantic model ADR-004 forbids in this module -- see
+        `_share_common_root()`'s own docstring."""
+        claim = Claim(claim_id="claim_001", text="The hound fled.")
+        evidence = Evidence(evidence_id="doc_1", content="The dog ran away.")
+        request = JudgeRequest(claim=claim, evidence=[evidence])
+        result = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence_ids=["doc_1"],
+        )
+
+        _, overlap_inconclusive = apply_citation_support_check(result, request)
+
+        assert overlap_inconclusive is False
+
+    def test_still_flags_when_no_synonym_relates_the_two(self) -> None:
         """The synonym normalization must not become so permissive that a
         genuinely fabricated citation (topically unrelated evidence) stops
-        being caught."""
+        being flagged -- it is still routed to human review, just no longer
+        by silently overriding the verdict (see class docstring)."""
         claim = Claim(claim_id="claim_001", text="The physician purchased an automobile.")
         evidence = Evidence(evidence_id="doc_1", content="The weather today is sunny and warm.")
         request = JudgeRequest(claim=claim, evidence=[evidence])
@@ -235,10 +263,10 @@ class TestCitationSupportCheck:
             evidence_ids=["doc_1"],
         )
 
-        downgraded, changed = apply_citation_support_check(result, request)
+        unchanged, overlap_inconclusive = apply_citation_support_check(result, request)
 
-        assert changed is True
-        assert downgraded.verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE
+        assert overlap_inconclusive is True
+        assert unchanged.verdict == ClaimVerdict.SUPPORTED
 
     def test_non_supported_verdicts_are_not_affected(self) -> None:
         """The overlap check is specific to SUPPORTED, not every verdict."""

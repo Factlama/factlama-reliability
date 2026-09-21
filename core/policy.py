@@ -165,6 +165,19 @@ class PolicyEngine:
         if any(v.code == "EVIDENCE_INJECTION_SUSPECTED" for v in all_violations):
             action = PolicyAction.HUMAN_REVIEW
 
+        # Re-audit follow-up (2026-09-21): the same pattern as
+        # EVIDENCE_INJECTION_SUSPECTED above, for the same reason. A cited
+        # evidence text sharing no recognized lexical/synonym/morphological
+        # overlap with its claim is genuinely ambiguous -- as consistent
+        # with a paraphrase this deterministic guard's vocabulary doesn't
+        # yet cover as with a fabricated citation
+        # (`judges.port.apply_citation_support_check()`'s own docstring) --
+        # so it no longer silently overrides the factual verdict either
+        # direction. It still must not be silently ignored: force human
+        # review so a person, not a guess, resolves the ambiguity.
+        if any(v.code == "CITATION_OVERLAP_INCONCLUSIVE" for v in all_violations):
+            action = PolicyAction.HUMAN_REVIEW
+
         return action, additional_violations
 
     def _determine_action(

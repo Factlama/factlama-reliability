@@ -151,6 +151,26 @@ class TestPolicyEngine:
         )
         assert any(v.code == "CITATION_MISMATCH" for v in violations)
 
+    def test_citation_overlap_inconclusive_forces_human_review(self) -> None:
+        """Re-audit follow-up (2026-09-21): CITATION_OVERLAP_INCONCLUSIVE
+        (judges.port.apply_citation_support_check() no longer overriding the
+        verdict for zero recognized overlap) forces HUMAN_REVIEW the same
+        way EVIDENCE_INJECTION_SUSPECTED already does, even for an otherwise
+        PASSing verdict -- distinct from CITATION_MISMATCH above, which does
+        not force review on its own."""
+        violation = Violation(
+            code="CITATION_OVERLAP_INCONCLUSIVE",
+            severity=Severity.MEDIUM,
+            claim_ids=["claim_001"],
+            evidence_ids=["doc_1"],
+        )
+        action, _ = self.engine.evaluate(
+            verdict=OverallVerdict.PASS,
+            scores={},
+            violations=[violation],
+        )
+        assert action == PolicyAction.HUMAN_REVIEW
+
     def test_tool_error_forces_failure_action_by_default(self) -> None:
         """Any tool error forces the on_failure action when fail_on_error is on (the default),
         without touching the passed-in factual verdict."""

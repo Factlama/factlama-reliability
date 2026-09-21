@@ -344,8 +344,13 @@ class Verifier:
                     evaluator_id=EVALUATOR_ID,
                     evaluator_version=EVALUATOR_VERSION,
                     provider_id=self.model_provider.name,
+                    # Same fix as the main per-claim path below: use the
+                    # composite (primary + secondary) identity, not the
+                    # primary-only resolved revision.
                     pinned_model_id=(
-                        resolved_pinned_version or provider_model_id or self.model_provider.name
+                        provider_identity.full_pinned_model_id(self.model_provider)
+                        or provider_model_id
+                        or self.model_provider.name
                     ),
                     configuration_version=configuration_version,
                     qualification_status=QualificationStatus.UNQUALIFIED.value,
@@ -629,16 +634,28 @@ class Verifier:
                     usage=judge_result.usage,
                 )
             # Read after `evaluate()`: a vendor adapter's resolved model
-            # revision is only available once its model has actually loaded
-            # (`judges/vendor_adapters.py`'s `resolved_revision`), which may
-            # first happen during this very call.
+            # revision(s) are only available once its model(s) have actually
+            # loaded (`judges/vendor_adapters.py`'s `resolved_revision`/
+            # `secondary_resolved_revision`), which may first happen during
+            # this very call.
             resolved_pinned_version = provider_identity.pinned_model_version(self.model_provider)
+            # Re-audit finding (2026-09-21, runtime identity): this must be
+            # `full_pinned_model_id()`, not bare `pinned_model_version()` --
+            # the latter reports only the primary model's revision, so a
+            # composite evaluator like NLIProvider (primary NLI model +
+            # secondary relatedness model) could change its secondary
+            # model's resolved revision without changing calibration_class,
+            # silently violating the changed-model -> changed-class rule
+            # `scripts/run_qualification.py`/`run_agreement_harness.py`
+            # already uphold via this same shared primitive.
             calibration_class = derive_calibration_class(
                 evaluator_id=EVALUATOR_ID,
                 evaluator_version=EVALUATOR_VERSION,
                 provider_id=self.model_provider.name,
                 pinned_model_id=(
-                    resolved_pinned_version or provider_model_id or self.model_provider.name
+                    provider_identity.full_pinned_model_id(self.model_provider)
+                    or provider_model_id
+                    or self.model_provider.name
                 ),
                 configuration_version=judge_request.configuration_version,
                 qualification_status=QualificationStatus.UNQUALIFIED.value,
@@ -647,8 +664,13 @@ class Verifier:
             # from this request (a hallucinated citation), before trusting it.
             judge_result = validate_judge_result(judge_result, judge_request)
             # Then run the conservative, non-model overlap/support check on
-            # whatever real evidence was cited (CONTRACTS.md).
-            judge_result, citation_downgraded = apply_citation_support_check(
+            # whatever real evidence was cited (CONTRACTS.md). Re-audit
+            # follow-up (2026-09-21): this no longer overrides the verdict
+            # itself -- see `apply_citation_support_check()`'s own docstring
+            # for why zero recognized overlap alone must not be treated as
+            # proof of a fabricated citation. `judge_result` is therefore
+            # never reassigned here; only whether to flag is read back.
+            _, citation_overlap_inconclusive = apply_citation_support_check(
                 judge_result, judge_request
             )
             attempt_completed = datetime.now(timezone.utc)
@@ -656,16 +678,26 @@ class Verifier:
             attempt_id = f"attempt_{uuid.uuid4().hex[:12]}"
             usage = judge_result.usage or Usage()
 
-            if citation_downgraded:
+            if citation_overlap_inconclusive:
+                # Not a verdict downgrade (see above) -- CITATION_OVERLAP_INCONCLUSIVE
+                # is a distinct code from `core.policy`'s own CITATION_MISMATCH
+                # (which flags a policy-level citation *requirement* violation, an
+                # unrelated concern) so this can be routed to mandatory human
+                # review (`core.policy`, ADR-013 pattern) without also forcing
+                # review on every policy-level citation-requirement violation.
                 citation_violations.append(
                     Violation(
-                        code="CITATION_MISMATCH",
+                        code="CITATION_OVERLAP_INCONCLUSIVE",
                         severity=Severity.MEDIUM,
                         claim_ids=[claim.claim_id],
                         evidence_ids=judge_result.evidence_ids,
                         message=(
-                            "Judge-cited evidence shares no content with the claim; "
-                            "downgraded from SUPPORTED to INSUFFICIENT_EVIDENCE"
+                            "Judge-cited evidence shares no recognized lexical/synonym/"
+                            "morphological overlap with the claim; the SUPPORTED verdict "
+                            "is not overridden (a legitimate paraphrase is not rejected "
+                            "solely for lacking shared words -- CONTRACTS.md), but this "
+                            "is routed to human review since this deterministic guard "
+                            "cannot distinguish that case from a fabricated citation."
                         ),
                     )
                 )

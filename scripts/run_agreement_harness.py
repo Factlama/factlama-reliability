@@ -125,11 +125,13 @@ def held_out_fixtures(directory: Path) -> list[AgreementFixture]:
     return _load_fixtures_from_dir(directory)
 
 
-def _held_out_content_hash(directory: Path) -> str:
+def _fixture_dir_content_hash(directory: Path) -> str:
     """sha256 over every `*.json` file's bytes in `directory`, sorted by
-    filename, so a later silent edit to the held-out set is detectable
-    against a report that cites an earlier hash
-    (evaluator-agreement-harness.md)."""
+    filename, so a later silent edit to a fixture set is detectable against
+    a report that cites an earlier hash (evaluator-agreement-harness.md).
+    Directory-generic: used for both the held-out set and (re-audit finding,
+    2026-09-21: leakage attestation was dataset-bound only on the held-out
+    side) the public dev set, since leakage review compares both."""
     digest = hashlib.sha256()
     for path in sorted(directory.glob("*.json")):
         digest.update(path.read_bytes())
@@ -320,12 +322,14 @@ def main(argv: list[str] | None = None) -> int:
     fixtures = dev_fixtures()
     report = score_provider(provider, fixtures)
     report["fixture_sources"] = {"dev": len(fixtures), "held_out": 0}
+    report["dev_hash"] = _fixture_dir_content_hash(DEV_FIXTURES_DIR)
 
     if args.held_out_dir is not None:
         ho_fixtures = held_out_fixtures(args.held_out_dir)
         combined = score_provider(provider, fixtures + ho_fixtures)
         combined["fixture_sources"] = {"dev": len(fixtures), "held_out": len(ho_fixtures)}
-        combined["held_out_hash"] = _held_out_content_hash(args.held_out_dir)
+        combined["dev_hash"] = report["dev_hash"]
+        combined["held_out_hash"] = _fixture_dir_content_hash(args.held_out_dir)
         report = combined
 
     json.dump(report, args.out, indent=2)

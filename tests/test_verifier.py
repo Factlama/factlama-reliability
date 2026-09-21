@@ -293,6 +293,67 @@ class TestResponseValidation:
         assert result.verdict != OverallVerdict.FAIL
 
 
+class _UnrelatedCitationProvider(JudgeProvider):
+    """Always SUPPORTED, citing whatever real evidence it was given, regardless of
+    whether it actually relates to the claim -- for exercising
+    `apply_citation_support_check()`'s zero-overlap path end to end."""
+
+    @property
+    def name(self) -> str:
+        return "unrelated-citation-test-provider"
+
+    def evaluate(self, request: JudgeRequest, deadline: float, cancellation) -> JudgeResult:
+        return JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence_ids=[e.evidence_id for e in request.evidence],
+        )
+
+
+class TestCitationOverlapInconclusive:
+    """End-to-end coverage for the re-audit follow-up (2026-09-21) behavior
+    of `apply_citation_support_check()`'s zero-overlap case: the factual
+    verdict is never overridden by this deterministic guard alone (see its
+    own docstring for why), and a genuine ambiguity is routed to mandatory
+    human review (`core.policy`, the same ADR-013 pattern used for
+    `EVIDENCE_INJECTION_SUSPECTED`) instead of silently guessed either way.
+    """
+
+    def test_zero_overlap_citation_keeps_verdict_but_forces_human_review(self) -> None:
+        """A citation with no lexical relation to its claim no longer downgrades
+        the verdict to INSUFFICIENT_EVIDENCE -- it stays SUPPORTED, flagged with
+        CITATION_OVERLAP_INCONCLUSIVE, and the policy action is forced to
+        HUMAN_REVIEW so a person resolves whether it was fabricated."""
+        result = Verifier(model_provider=_UnrelatedCitationProvider()).verify(
+            _request(
+                answer="Company X was founded in 2018.",
+                evidence=[
+                    Evidence(evidence_id="doc_1", content="The weather today is sunny and warm.")
+                ],
+            )
+        )
+
+        assert all(c.verdict == ClaimVerdict.SUPPORTED for c in result.claims)
+        assert result.verdict == OverallVerdict.PASS
+        violation = next(v for v in result.violations if v.code == "CITATION_OVERLAP_INCONCLUSIVE")
+        assert violation.evidence_ids == ["doc_1"]
+        assert result.policy_action == PolicyAction.HUMAN_REVIEW.value
+
+    def test_legitimate_zero_overlap_paraphrase_is_not_flagged_or_reviewed(self) -> None:
+        """CONTRACTS.md: "legitimate paraphrase is not rejected solely for lacking
+        shared words" -- a recognized paraphrase with zero raw token overlap stays
+        SUPPORTED, unflagged, with the normal (not forced) policy action."""
+        result = Verifier(model_provider=_UnrelatedCitationProvider()).verify(
+            _request(
+                answer="The physician purchased an automobile.",
+                evidence=[Evidence(evidence_id="doc_1", content="The doctor bought a car.")],
+            )
+        )
+
+        assert all(c.verdict == ClaimVerdict.SUPPORTED for c in result.claims)
+        assert not any(v.code == "CITATION_OVERLAP_INCONCLUSIVE" for v in result.violations)
+        assert result.policy_action == PolicyAction.PASS.value
+
+
 class TestProviderIdentityInAttempts:
     """F2 of the 2026-09-21 G0-G4 validation report: `Attempt.model_id`/
     `pinned_model_version`/`configuration_version`/`calibration_class` must

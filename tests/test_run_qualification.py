@@ -13,6 +13,7 @@ from scripts.run_qualification import _load_leakage_attestation, main
 
 _DATASET_KWARGS = {
     "dataset_version": "harness-0.1",
+    "dev_hash": "cafebabe" * 8,
     "held_out_hash": "deadbeef" * 8,
     "dev_fixture_count": 24,
     "held_out_fixture_count": 16,
@@ -66,6 +67,16 @@ class TestLoadLeakageAttestation:
         path = tmp_path / "attestation.json"
         _write_attestation(path, held_out_hash="stale" * 8)
         with pytest.raises(ValueError, match="held_out_hash"):
+            _load_leakage_attestation(path, **_DATASET_KWARGS)
+
+    def test_stale_dev_hash_is_rejected(self, tmp_path: Path) -> None:
+        """Follow-up re-audit finding (2026-09-21): editing public dev
+        fixture *content* without changing dev_fixture_count must still
+        invalidate a stale attestation -- leakage review compares both
+        sets' content, not just the held-out side's."""
+        path = tmp_path / "attestation.json"
+        _write_attestation(path, dev_hash="stale" * 8)
+        with pytest.raises(ValueError, match="dev_hash"):
             _load_leakage_attestation(path, **_DATASET_KWARGS)
 
     def test_stale_dataset_version_is_rejected(self, tmp_path: Path) -> None:
