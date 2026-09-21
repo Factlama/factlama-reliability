@@ -208,3 +208,10 @@ name = "domain code and api must depend on storage.backend, not the concrete sto
 type = "forbidden"
 source_modules = ["schemas", "core", "judges", "api"]
 forbidden_modules = ["storage.postgres"]
+# api.bootstrap is the one designated composition-root module (ADR-019
+# SS3): it constructs the concrete PostgresStorageBackend at process
+# startup so the rest of api/ never has to.
+ignore_imports = [
+    "api.bootstrap -> storage.postgres.backend",
+    "api.bootstrap -> storage.postgres.engine",
+]

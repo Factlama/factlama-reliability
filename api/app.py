@@ -1,40 +1,66 @@
-"""REL-12's synchronous verification API: `POST /v0.1/verifications`
-(API.md), the API/worker half of LOW_LEVEL_IMPLEMENTATION.md's `api` unit.
-
-Scope is deliberately synchronous-only. Async submission/status
-(`POST /v0.1/verification-jobs`, REL-10) and its idempotency/outbox mechanics
-need G5's durable persistence, which does not exist in this repo yet -- G3's
-own acceptance criterion is "sync API", not the full API.md surface.
+"""REL-12's HTTP API (API.md): `POST /v0.1/verifications` (sync, G3) plus
+G5's durable async surface -- `POST /v0.1/verification-jobs`,
+`GET /v0.1/verification-jobs/{job_id}`, `GET /v0.1/verifications/{evaluation_id}`,
+`POST /v0.1/verification-jobs/{job_id}/cancel` -- now that
+`storage.postgres` (G5 PR1) gives the async routes' idempotency/outbox
+mechanics somewhere to live.
 
 This is also `TenantContext`'s first real caller (see `schemas/tenancy.py`'s
 docstring: "no authenticated ingress exists yet -- that is G3's sync API").
 `authenticate()` below is the boundary that must call `TenantContext.authorizes()`
-before a request reaches `Verifier.verify()`, not merely echo a tenant_id it
-was handed -- closing REL-02's remaining "propagate context through API" and
-"negative cross-tenant test against a real boundary" items.
+before a request reaches `Verifier.verify()`/the storage backend, not merely
+echo a tenant_id it was handed -- closing REL-02's remaining "propagate
+context through API" and "negative cross-tenant test against a real
+boundary" items.
+
+Async routes depend on `storage.backend.StorageBackend` only, never
+`storage.postgres` directly -- `api/bootstrap.py` is the one composition-root
+module that constructs the concrete Postgres backend
+(`pyproject.toml`'s import-linter contract enforces this).
 """
 
+import hashlib
+import json
 import logging
-from typing import Annotated
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
+from api.bootstrap import check_storage_ready, lifespan
 from api.errors import ApiError, ApiErrorCode
 from api.settings import Settings, get_settings
 from core.verifier import Verifier, get_default_verifier
 from schemas.tenancy import TenantContext
 from schemas.verification import VerificationRequest
+from storage.backend import StorageBackend
+from storage.errors import JobConflict, JobNotFound
+from storage.models import Job
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="FactLama Reliability API", version="0.1")
+app = FastAPI(title="FactLama Reliability API", version="0.1", lifespan=lifespan)
 
 
 def get_verifier() -> Verifier:
     return get_default_verifier()
+
+
+def get_storage_backend(request: Request) -> StorageBackend:
+    """Populated by `api.bootstrap.lifespan` at process startup. Tests
+    override this dependency directly (like `get_verifier`/`get_settings`),
+    so they never depend on `app.state` or on lifespan having actually run."""
+    backend: StorageBackend = request.app.state.storage_backend
+    return backend
+
+
+async def get_storage_readiness(request: Request) -> bool:
+    """A live check, not just "did startup succeed once" -- overridden
+    directly in tests for the same reason as `get_storage_backend`."""
+    return await check_storage_ready(request.app)
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -74,10 +100,12 @@ async def health_live() -> dict[str, str]:
 
 
 @app.get("/health/ready")
-async def health_ready() -> dict[str, str]:
-    # No durable dependency exists in this pass (no DB, no queue) -- ready is
-    # equivalent to live until G5 gives this something real to check.
-    return {"status": "ok"}
+async def health_ready(
+    storage_ready: Annotated[bool, Depends(get_storage_readiness)],
+) -> JSONResponse:
+    if not storage_ready:
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+    return JSONResponse(status_code=200, content={"status": "ok"})
 
 
 def _validation_error_message(exc: ValidationError) -> str:
@@ -146,20 +174,9 @@ async def _read_body_within_limit(request: Request, max_body_bytes: int) -> byte
     return b"".join(chunks)
 
 
-@app.post("/v0.1/verifications")
-async def create_verification(
-    request: Request,
-    tenant_context: Annotated[TenantContext, Depends(authenticate)],
-    settings: Annotated[Settings, Depends(get_settings)],
-    verifier: Annotated[Verifier, Depends(get_verifier)],
-) -> JSONResponse:
-    _require_json_content_type(request)
-    _enforce_content_length_limit(request, settings.max_body_bytes)
-
-    body = await _read_body_within_limit(request, settings.max_body_bytes)
-
+def _parse_verification_request(body: bytes) -> VerificationRequest:
     try:
-        verification_request = VerificationRequest.model_validate_json(body)
+        return VerificationRequest.model_validate_json(body)
     except ValidationError as exc:
         message = _validation_error_message(exc)
         if "Unsupported schema version" in message:
@@ -173,6 +190,10 @@ async def create_verification(
             code = ApiErrorCode.INVALID_ARGUMENT
         raise ApiError(code, message) from exc
 
+
+def _authorize_request_scope(
+    tenant_context: TenantContext, verification_request: VerificationRequest
+) -> None:
     if not tenant_context.authorizes(
         verification_request.project_id, verification_request.application_id
     ):
@@ -187,6 +208,21 @@ async def create_verification(
             "credential is not authorized for the requested project/application scope",
         )
 
+
+@app.post("/v0.1/verifications")
+async def create_verification(
+    request: Request,
+    tenant_context: Annotated[TenantContext, Depends(authenticate)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    verifier: Annotated[Verifier, Depends(get_verifier)],
+) -> JSONResponse:
+    _require_json_content_type(request)
+    _enforce_content_length_limit(request, settings.max_body_bytes)
+
+    body = await _read_body_within_limit(request, settings.max_body_bytes)
+    verification_request = _parse_verification_request(body)
+    _authorize_request_scope(tenant_context, verification_request)
+
     # verifier.verify() is a synchronous, potentially model-heavy call (a
     # local embedding/NLI evaluation is CPU-bound). Running it directly in
     # this coroutine would block the whole event loop for every other
@@ -199,3 +235,123 @@ async def create_verification(
     # unmeasured ScoreValue.value) to be absent, not present as null -- see
     # CONTRACTS.md: "null means known absent; omitted means not supplied."
     return JSONResponse(status_code=200, content=result.model_dump(mode="json", exclude_none=True))
+
+
+def _canonical_request_hash(verification_request: VerificationRequest) -> str:
+    """API.md: "Reuse with identical canonical request body returns the
+    original job; reuse with a different body returns 409." Canonical means
+    content-equivalent, not byte-identical -- key order/whitespace in the
+    client's original bytes must not matter, so this hashes the parsed and
+    re-sorted structure, not the raw request body."""
+    canonical = json.dumps(
+        verification_request.model_dump(mode="json", exclude_none=True),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _require_idempotency_key(idempotency_key: str | None) -> str:
+    """API.md: "The client supplies Idempotency-Key for async submission
+    (1-128 opaque characters)." Missing or out-of-range is a caller error,
+    not a silently-generated key -- a generated key would defeat the whole
+    point of client-supplied idempotency."""
+    if idempotency_key is None or not (1 <= len(idempotency_key) <= 128):
+        raise ApiError(
+            ApiErrorCode.INVALID_ARGUMENT,
+            "Idempotency-Key header is required and must be 1-128 characters",
+        )
+    return idempotency_key
+
+
+def _job_status_body(job: Job) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "schema_version": "0.1",
+        "job_id": job.job_id,
+        "state": job.state.value,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "attempt_count": job.attempt_count,
+    }
+    if job.evaluation_id is not None:
+        body["evaluation_id"] = job.evaluation_id
+        body["result_url"] = f"/v0.1/verifications/{job.evaluation_id}"
+    return body
+
+
+@app.post("/v0.1/verification-jobs", status_code=202)
+async def create_verification_job(
+    request: Request,
+    tenant_context: Annotated[TenantContext, Depends(authenticate)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    storage_backend: Annotated[StorageBackend, Depends(get_storage_backend)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> JSONResponse:
+    _require_json_content_type(request)
+    _enforce_content_length_limit(request, settings.max_body_bytes)
+    key = _require_idempotency_key(idempotency_key)
+
+    body = await _read_body_within_limit(request, settings.max_body_bytes)
+    verification_request = _parse_verification_request(body)
+    _authorize_request_scope(tenant_context, verification_request)
+
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=settings.job_deadline_seconds)
+    try:
+        job = await storage_backend.submit_or_get_job(
+            tenant_context,
+            "verification-jobs",
+            key,
+            _canonical_request_hash(verification_request),
+            verification_request,
+            deadline,
+        )
+    except JobConflict as exc:
+        raise ApiError(
+            ApiErrorCode.CONFLICT,
+            "Idempotency-Key was already used with a different request body",
+        ) from exc
+
+    return JSONResponse(status_code=202, content=_job_status_body(job))
+
+
+@app.get("/v0.1/verification-jobs/{job_id}")
+async def get_verification_job(
+    job_id: str,
+    tenant_context: Annotated[TenantContext, Depends(authenticate)],
+    storage_backend: Annotated[StorageBackend, Depends(get_storage_backend)],
+) -> JSONResponse:
+    job = await storage_backend.get_job_status(tenant_context, job_id)
+    if job is None:
+        raise ApiError(ApiErrorCode.NOT_FOUND, "job not found")
+    return JSONResponse(status_code=200, content=_job_status_body(job))
+
+
+@app.get("/v0.1/verifications/{evaluation_id}")
+async def get_verification_result(
+    evaluation_id: str,
+    tenant_context: Annotated[TenantContext, Depends(authenticate)],
+    storage_backend: Annotated[StorageBackend, Depends(get_storage_backend)],
+) -> JSONResponse:
+    result = await storage_backend.get_result(tenant_context, evaluation_id)
+    if result is None:
+        raise ApiError(ApiErrorCode.NOT_FOUND, "evaluation not found")
+    return JSONResponse(status_code=200, content=result.model_dump(mode="json", exclude_none=True))
+
+
+@app.post("/v0.1/verification-jobs/{job_id}/cancel")
+async def cancel_verification_job(
+    job_id: str,
+    tenant_context: Annotated[TenantContext, Depends(authenticate)],
+    storage_backend: Annotated[StorageBackend, Depends(get_storage_backend)],
+) -> JSONResponse:
+    try:
+        await storage_backend.request_cancel(tenant_context, job_id)
+    except JobNotFound as exc:
+        raise ApiError(ApiErrorCode.NOT_FOUND, "job not found") from exc
+
+    job = await storage_backend.get_job_status(tenant_context, job_id)
+    if job is None:
+        # request_cancel just succeeded against this tenant/job_id; a
+        # concurrent deletion is not a supported operation in this repo.
+        raise ApiError(ApiErrorCode.INTERNAL, "job vanished immediately after cancellation")
+    return JSONResponse(status_code=200, content=_job_status_body(job))

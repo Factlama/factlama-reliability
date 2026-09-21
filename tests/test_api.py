@@ -7,6 +7,7 @@ API, not typed-context logic against a Python function argument.
 import asyncio
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -17,6 +18,8 @@ from api.app import (
     _read_body_within_limit,
     _require_json_content_type,
     app,
+    get_storage_backend,
+    get_storage_readiness,
     get_verifier,
 )
 from api.auth import TenantCredentialStore
@@ -27,10 +30,138 @@ from judges.port import CancellationToken, JudgeProvider, JudgeRequest, JudgeRes
 from judges.providers import MockModelProvider
 from schemas.claims import ClaimVerdict
 from schemas.tenancy import TenantContext
+from schemas.verification import (
+    AbstentionReason,
+    OverallVerdict,
+    Provenance,
+    ResultStatus,
+    VerificationMode,
+    VerificationRequest,
+    VerificationResult,
+)
+from storage.errors import JobConflict, JobNotFound
+from storage.models import ClaimedJob, Job, JobState, OutboxEvent
 
 TENANT_ONE_KEY = "key-tenant-one"
 TENANT_ONE_SCOPED_KEY = "key-tenant-one-scoped-to-proj-a"
 TENANT_TWO_KEY = "key-tenant-two"
+
+
+class FakeStorageBackend:
+    """An in-memory `StorageBackend` double for API-layer tests: routing,
+    header/status-code handling, and tenant scoping at the HTTP boundary.
+    Real atomicity/concurrency/fencing guarantees are proven against a live
+    PostgreSQL by `tests/conformance/`, not re-tested here -- this fake only
+    implements enough correct behavior (idempotency-key matching, tenant
+    scoping) to exercise that boundary honestly.
+    """
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, Job] = {}
+        self._idempotency: dict[tuple[str, str, str, str], tuple[str, str]] = {}
+        self._results: dict[tuple[str, str], VerificationResult] = {}
+        self.cancelled_job_ids: set[str] = set()
+
+    def seed_result(self, tenant_id: str, evaluation_id: str, result: VerificationResult) -> None:
+        self._results[(tenant_id, evaluation_id)] = result
+
+    async def submit_or_get_job(
+        self,
+        tenant: TenantContext,
+        route: str,
+        idempotency_key: str,
+        canonical_request_hash: str,
+        request: VerificationRequest,
+        deadline: datetime,
+    ) -> Job:
+        key = (tenant.tenant_id, route, request.project_id, idempotency_key)
+        existing = self._idempotency.get(key)
+        if existing is not None:
+            existing_hash, job_id = existing
+            if existing_hash != canonical_request_hash:
+                raise JobConflict("idempotency key reused with a different request body")
+            return self._jobs[job_id]
+
+        now = datetime.now(timezone.utc)
+        job_id = f"job_{len(self._jobs) + 1}"
+        job = Job(
+            job_id=job_id,
+            tenant_id=tenant.tenant_id,
+            project_id=request.project_id,
+            application_id=request.application_id,
+            state=JobState.QUEUED,
+            created_at=now,
+            updated_at=now,
+            attempt_count=0,
+        )
+        self._jobs[job_id] = job
+        self._idempotency[key] = (canonical_request_hash, job_id)
+        return job
+
+    async def get_job_status(self, tenant: TenantContext, job_id: str) -> Job | None:
+        job = self._jobs.get(job_id)
+        if job is None or job.tenant_id != tenant.tenant_id:
+            return None
+        if not tenant.authorizes(job.project_id, job.application_id):
+            return None
+        return job
+
+    async def get_result(
+        self, tenant: TenantContext, evaluation_id: str
+    ) -> VerificationResult | None:
+        result = self._results.get((tenant.tenant_id, evaluation_id))
+        if result is None:
+            return None
+        if not tenant.authorizes(result.project_id, result.application_id):
+            return None
+        return result
+
+    async def request_cancel(self, tenant: TenantContext, job_id: str) -> None:
+        job = self._jobs.get(job_id)
+        if job is None or job.tenant_id != tenant.tenant_id:
+            raise JobNotFound(f"job {job_id} not found")
+        if not tenant.authorizes(job.project_id, job.application_id):
+            raise JobNotFound(f"job {job_id} not found")
+        self.cancelled_job_ids.add(job_id)
+
+    # The routes under test never reach these -- they belong to the future
+    # worker (PR3). Raising loudly means a test that accidentally depends on
+    # worker-only behavior fails clearly instead of silently no-op'ing.
+    async def claim_due_job(self, worker_id: str, lease_duration: timedelta) -> ClaimedJob | None:
+        raise NotImplementedError
+
+    async def renew_lease(self, job_id: str, fencing_token: int, extension: timedelta) -> datetime:
+        raise NotImplementedError
+
+    async def commit_evaluation_and_outbox(
+        self,
+        job_id: str,
+        fencing_token: int,
+        result: VerificationResult,
+        event: OutboxEvent,
+    ) -> None:
+        raise NotImplementedError
+
+    async def fail_job_terminal(
+        self, job_id: str, fencing_token: int, error_code: str, error_message: str
+    ) -> None:
+        raise NotImplementedError
+
+    async def release_for_retry(
+        self, job_id: str, fencing_token: int, not_before: datetime
+    ) -> None:
+        raise NotImplementedError
+
+    async def is_cancellation_requested(self, job_id: str) -> bool:
+        raise NotImplementedError
+
+    async def claim_outbox_batch(
+        self, worker_id: str, lease_duration: timedelta, limit: int
+    ) -> list[OutboxEvent]:
+        raise NotImplementedError
+
+    async def ack_outbox(self, event_id: str, worker_id: str) -> None:
+        raise NotImplementedError
 
 
 def _build_settings(max_body_bytes: int = 1_000_000) -> Settings:
@@ -43,16 +174,27 @@ def _build_settings(max_body_bytes: int = 1_000_000) -> Settings:
         }
     )
     settings.max_body_bytes = max_body_bytes
+    settings.job_deadline_seconds = 300
     return settings
 
 
 @pytest.fixture
-def client() -> TestClient:
-    """A TestClient wired to a fixed, in-memory tenant credential store and
-    a deterministic MockModelProvider -- no environment variables, no real
-    judge dispatch."""
+def storage_backend() -> FakeStorageBackend:
+    return FakeStorageBackend()
+
+
+@pytest.fixture
+def client(storage_backend: FakeStorageBackend) -> TestClient:
+    """A TestClient wired to a fixed, in-memory tenant credential store, a
+    deterministic MockModelProvider, and an in-memory storage backend -- no
+    environment variables, no real judge dispatch, no real database. Every
+    dependency `api/app.py` defines is overridden here (the same pattern as
+    `get_verifier`/`get_settings`), so this fixture never depends on
+    `app.state` or on FastAPI's lifespan actually having run."""
     app.dependency_overrides[get_settings] = lambda: _build_settings()
     app.dependency_overrides[get_verifier] = lambda: Verifier(model_provider=MockModelProvider())
+    app.dependency_overrides[get_storage_backend] = lambda: storage_backend
+    app.dependency_overrides[get_storage_readiness] = lambda: True
     try:
         yield TestClient(app)
     finally:
@@ -72,6 +214,33 @@ def _valid_body(project_id: str = "proj-a", application_id: str = "app-a") -> di
         "answer": "Paris is the capital of France.",
         "evidence": [{"evidence_id": "e1", "content": "Paris is the capital of France."}],
     }
+
+
+def _seeded_result(
+    evaluation_id: str,
+    tenant_id: str = "tenant-one",
+    project_id: str = "proj-a",
+    application_id: str = "app-a",
+) -> VerificationResult:
+    now = datetime.now(timezone.utc)
+    return VerificationResult(
+        evaluation_id=evaluation_id,
+        request_id="req-seeded",
+        tenant_id=tenant_id,
+        project_id=project_id,
+        application_id=application_id,
+        status=ResultStatus.ABSTAINED,
+        abstention_reason=AbstentionReason.NO_CHECKABLE_CLAIMS,
+        verdict=OverallVerdict.ABSTAIN,
+        provenance=Provenance(
+            evaluator_id="test",
+            evaluator_version="0.0.0",
+            mode=VerificationMode.STANDARD,
+            routing_profile_version="0.0.0",
+            started_at=now,
+            completed_at=now,
+        ),
+    )
 
 
 class TestTenantCredentialStore:
@@ -142,6 +311,14 @@ class TestHealth:
     def test_ready(self, client: TestClient) -> None:
         response = client.get("/health/ready")
         assert response.status_code == 200
+
+    def test_not_ready_when_storage_is_unreachable(self, client: TestClient) -> None:
+        app.dependency_overrides[get_storage_readiness] = lambda: False
+        try:
+            response = client.get("/health/ready")
+        finally:
+            app.dependency_overrides[get_storage_readiness] = lambda: True
+        assert response.status_code == 503
 
 
 class TestAuthentication:
@@ -518,3 +695,163 @@ class TestVerificationResult:
         assert response.status_code == 200
         result = response.json()
         assert result["claims"][0]["verdict"] == "UNSUPPORTED"
+
+
+def _idempotency_headers(api_key: str, idempotency_key: str = "idem-1") -> dict[str, str]:
+    return {**_auth(api_key), "Idempotency-Key": idempotency_key}
+
+
+class TestCreateVerificationJob:
+    def test_submission_returns_202_with_a_queued_job(self, client: TestClient) -> None:
+        response = client.post(
+            "/v0.1/verification-jobs",
+            json=_valid_body(),
+            headers=_idempotency_headers(TENANT_ONE_KEY),
+        )
+        assert response.status_code == 202
+        body = response.json()
+        assert body["state"] == "QUEUED"
+        assert "job_id" in body
+        assert "evaluation_id" not in body
+
+    def test_missing_idempotency_key_is_400(self, client: TestClient) -> None:
+        response = client.post(
+            "/v0.1/verification-jobs", json=_valid_body(), headers=_auth(TENANT_ONE_KEY)
+        )
+        assert response.status_code == 400
+
+    def test_same_key_and_body_returns_the_same_job(self, client: TestClient) -> None:
+        headers = _idempotency_headers(TENANT_ONE_KEY, "idem-same")
+        first = client.post("/v0.1/verification-jobs", json=_valid_body(), headers=headers)
+        second = client.post("/v0.1/verification-jobs", json=_valid_body(), headers=headers)
+
+        assert first.status_code == 202
+        assert second.status_code == 202
+        assert first.json()["job_id"] == second.json()["job_id"]
+
+    def test_same_key_different_body_is_409(self, client: TestClient) -> None:
+        headers = _idempotency_headers(TENANT_ONE_KEY, "idem-conflict")
+        client.post("/v0.1/verification-jobs", json=_valid_body(), headers=headers)
+
+        conflicting_body = _valid_body()
+        conflicting_body["answer"] = "A completely different answer."
+        response = client.post("/v0.1/verification-jobs", json=conflicting_body, headers=headers)
+
+        assert response.status_code == 409
+
+    def test_cross_tenant_body_is_rejected(self, client: TestClient) -> None:
+        response = client.post(
+            "/v0.1/verification-jobs",
+            json=_valid_body(project_id="proj-b"),
+            headers=_idempotency_headers(TENANT_ONE_SCOPED_KEY),
+        )
+        assert response.status_code == 403
+
+    def test_missing_authorization_is_401(self, client: TestClient) -> None:
+        response = client.post(
+            "/v0.1/verification-jobs",
+            json=_valid_body(),
+            headers={"Idempotency-Key": "idem-1"},
+        )
+        assert response.status_code == 401
+
+
+class TestGetVerificationJob:
+    def test_returns_the_submitted_jobs_status(self, client: TestClient) -> None:
+        submitted = client.post(
+            "/v0.1/verification-jobs",
+            json=_valid_body(),
+            headers=_idempotency_headers(TENANT_ONE_KEY),
+        )
+        job_id = submitted.json()["job_id"]
+
+        response = client.get(f"/v0.1/verification-jobs/{job_id}", headers=_auth(TENANT_ONE_KEY))
+
+        assert response.status_code == 200
+        assert response.json()["job_id"] == job_id
+
+    def test_unknown_job_is_404(self, client: TestClient) -> None:
+        response = client.get(
+            "/v0.1/verification-jobs/job_does_not_exist", headers=_auth(TENANT_ONE_KEY)
+        )
+        assert response.status_code == 404
+
+    def test_other_tenants_job_is_404_not_403(self, client: TestClient) -> None:
+        submitted = client.post(
+            "/v0.1/verification-jobs",
+            json=_valid_body(),
+            headers=_idempotency_headers(TENANT_ONE_KEY),
+        )
+        job_id = submitted.json()["job_id"]
+
+        response = client.get(f"/v0.1/verification-jobs/{job_id}", headers=_auth(TENANT_TWO_KEY))
+
+        # CONTRACTS.md: "missing or inaccessible IDs return the same 404" --
+        # a cross-tenant job must not be distinguishable from a nonexistent one.
+        assert response.status_code == 404
+
+
+class TestGetVerificationResult:
+    def test_returns_a_seeded_result(
+        self, client: TestClient, storage_backend: FakeStorageBackend
+    ) -> None:
+        storage_backend.seed_result("tenant-one", "eval-seeded", _seeded_result("eval-seeded"))
+
+        response = client.get("/v0.1/verifications/eval-seeded", headers=_auth(TENANT_ONE_KEY))
+
+        assert response.status_code == 200
+        assert response.json()["evaluation_id"] == "eval-seeded"
+
+    def test_unknown_evaluation_is_404(self, client: TestClient) -> None:
+        response = client.get(
+            "/v0.1/verifications/eval_does_not_exist", headers=_auth(TENANT_ONE_KEY)
+        )
+        assert response.status_code == 404
+
+    def test_other_tenants_result_is_404(
+        self, client: TestClient, storage_backend: FakeStorageBackend
+    ) -> None:
+        storage_backend.seed_result("tenant-one", "eval-seeded", _seeded_result("eval-seeded"))
+
+        response = client.get("/v0.1/verifications/eval-seeded", headers=_auth(TENANT_TWO_KEY))
+
+        assert response.status_code == 404
+
+
+class TestCancelVerificationJob:
+    def test_cancel_marks_the_job_as_cancel_requested(
+        self, client: TestClient, storage_backend: FakeStorageBackend
+    ) -> None:
+        submitted = client.post(
+            "/v0.1/verification-jobs",
+            json=_valid_body(),
+            headers=_idempotency_headers(TENANT_ONE_KEY),
+        )
+        job_id = submitted.json()["job_id"]
+
+        response = client.post(
+            f"/v0.1/verification-jobs/{job_id}/cancel", headers=_auth(TENANT_ONE_KEY)
+        )
+
+        assert response.status_code == 200
+        assert job_id in storage_backend.cancelled_job_ids
+
+    def test_unknown_job_is_404(self, client: TestClient) -> None:
+        response = client.post(
+            "/v0.1/verification-jobs/job_does_not_exist/cancel", headers=_auth(TENANT_ONE_KEY)
+        )
+        assert response.status_code == 404
+
+    def test_other_tenants_job_is_404(self, client: TestClient) -> None:
+        submitted = client.post(
+            "/v0.1/verification-jobs",
+            json=_valid_body(),
+            headers=_idempotency_headers(TENANT_ONE_KEY),
+        )
+        job_id = submitted.json()["job_id"]
+
+        response = client.post(
+            f"/v0.1/verification-jobs/{job_id}/cancel", headers=_auth(TENANT_TWO_KEY)
+        )
+
+        assert response.status_code == 404
