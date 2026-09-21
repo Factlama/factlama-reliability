@@ -1,0 +1,29 @@
+[
+  {
+    "fixture_id": "paraphrased_support_1",
+    "family": "paraphrased_support",
+    "claim": {"claim_id": "ps1", "text": "Sharks are cartilaginous fish."},
+    "evidence": [
+      {"evidence_id": "ps1_e1", "content": "Unlike bony fish, sharks possess skeletons made of cartilage rather than bone."}
+    ],
+    "expected_verdict": "SUPPORTED"
+  },
+  {
+    "fixture_id": "paraphrased_support_2",
+    "family": "paraphrased_support",
+    "claim": {"claim_id": "ps2", "text": "Mount Everest is the tallest mountain on Earth."},
+    "evidence": [
+      {"evidence_id": "ps2_e1", "content": "Everest's summit sits higher above sea level than any other peak on the planet."}
+    ],
+    "expected_verdict": "SUPPORTED"
+  },
+  {
+    "fixture_id": "paraphrased_support_3",
+    "family": "paraphrased_support",
+    "claim": {"claim_id": "ps3", "text": "Photosynthesis converts sunlight into chemical energy."},
+    "evidence": [
+      {"evidence_id": "ps3_e1", "content": "Through photosynthesis, plants store the energy of sunlight in chemical form."}
+    ],
+    "expected_verdict": "SUPPORTED"
+  }
+]

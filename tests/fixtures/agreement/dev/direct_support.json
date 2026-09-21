@@ -1,0 +1,29 @@
+[
+  {
+    "fixture_id": "direct_support_1",
+    "family": "direct_support",
+    "claim": {"claim_id": "ds1", "text": "Paris is the capital of France."},
+    "evidence": [
+      {"evidence_id": "ds1_e1", "content": "Paris is the capital of France."}
+    ],
+    "expected_verdict": "SUPPORTED"
+  },
+  {
+    "fixture_id": "direct_support_2",
+    "family": "direct_support",
+    "claim": {"claim_id": "ds2", "text": "Water boils at 100 degrees Celsius at sea level."},
+    "evidence": [
+      {"evidence_id": "ds2_e1", "content": "At sea level, water boils at 100 degrees Celsius."}
+    ],
+    "expected_verdict": "SUPPORTED"
+  },
+  {
+    "fixture_id": "direct_support_3",
+    "family": "direct_support",
+    "claim": {"claim_id": "ds3", "text": "The Great Wall of China is over 13,000 miles long."},
+    "evidence": [
+      {"evidence_id": "ds3_e1", "content": "The Great Wall of China stretches more than 13,000 miles."}
+    ],
+    "expected_verdict": "SUPPORTED"
+  }
+]

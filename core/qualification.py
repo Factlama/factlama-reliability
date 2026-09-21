@@ -17,10 +17,64 @@ label set. Only a real agreement report (`evaluator-agreement-harness.md`)
 can advance a `QualificationRecord` past `CONFORMANCE_PASSED`.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from core.compliance import is_provider_compliant
+
+#: ADR-018's per-label qualification bar. A label is only checked once it has
+#: at least ADR_018_MIN_LABEL_N scored examples (dev + held-out combined) --
+#: below that, a precision/recall number is too noisy to gate on, so the
+#: label is skipped rather than failed. SUPPORTED/CONTRADICTED carry a
+#: higher bar because they are the labels a downstream policy action (BLOCK,
+#: PASS) most directly depends on; UNSUPPORTED/INSUFFICIENT_EVIDENCE get a
+#: lower bar because the boundary between "no support" and "insufficient
+#: evidence" is inherently fuzzier for a T0 adapter.
+ADR_018_MIN_LABEL_N = 5
+ADR_018_THRESHOLDS: dict[str, tuple[float, float]] = {
+    "SUPPORTED": (0.80, 0.80),
+    "CONTRADICTED": (0.80, 0.80),
+    "UNSUPPORTED": (0.70, 0.70),
+    "INSUFFICIENT_EVIDENCE": (0.70, 0.70),
+}
+
+
+def evaluate_agreement_thresholds(
+    per_label: Mapping[str, Mapping[str, float | int | None]],
+) -> list[str]:
+    """ADR-018's per-label qualification bar, applied to an agreement
+    report's `per_label` section (`evaluator-agreement-harness.md`'s report
+    schema). Returns human-readable failure reasons; empty means every label
+    with enough scored examples met its precision/recall bar.
+
+    A label missing from `per_label`, or with fewer than
+    `ADR_018_MIN_LABEL_N` scored examples, is skipped -- not failed -- per
+    ADR-018: too few samples to draw a threshold conclusion from is a named
+    data gap, not a quality failure. Skipping every label (an empty or
+    all-thin report) is caught separately by `report_agreement()`, which
+    also requires at least one label to have reached the minimum sample size
+    before a report counts as evidence at all.
+    """
+    failures: list[str] = []
+    for label, (min_precision, min_recall) in ADR_018_THRESHOLDS.items():
+        metrics = per_label.get(label)
+        if metrics is None:
+            continue
+        n = metrics.get("n") or 0
+        if n < ADR_018_MIN_LABEL_N:
+            continue
+        precision = metrics.get("precision")
+        recall = metrics.get("recall")
+        if precision is None or precision < min_precision:
+            failures.append(f"{label}: precision {precision} < {min_precision} (n={n})")
+        if recall is None or recall < min_recall:
+            failures.append(f"{label}: recall {recall} < {min_recall} (n={n})")
+    return failures
+
+
+def _has_sufficient_sample_size(per_label: Mapping[str, Mapping[str, float | int | None]]) -> bool:
+    return any((metrics.get("n") or 0) >= ADR_018_MIN_LABEL_N for metrics in per_label.values())
 
 
 class QualificationState(str, Enum):
@@ -58,6 +112,7 @@ class QualificationRecord:
     adversarial_flips: int | None = None
     approved_tenant_ids: frozenset[str] = field(default_factory=frozenset)
     compliance_tags: frozenset[str] = field(default_factory=frozenset)
+    threshold_failures: tuple[str, ...] = ()
 
 
 def mark_conformance_passed(record: QualificationRecord) -> QualificationRecord:
@@ -76,24 +131,52 @@ def report_agreement(
     *,
     dataset_version: str,
     adversarial_flips: int,
+    per_label: Mapping[str, Mapping[str, float | int | None]],
 ) -> QualificationRecord:
-    """`CONFORMANCE_PASSED -> AGREEMENT_REPORTED`, only if the report shows
-    zero adversarial fixtures flipped to SUPPORTED (ADR-013). A nonzero
-    count refuses the transition -- the record stays `CONFORMANCE_PASSED`,
-    per evaluator-registry.md, rather than raising: a failed agreement
-    report is an expected outcome, not a programming error.
+    """`CONFORMANCE_PASSED -> AGREEMENT_REPORTED`, only if all of (ADR-013,
+    ADR-018):
+
+    1. Zero adversarial fixtures flipped to SUPPORTED.
+    2. At least one label reached `ADR_018_MIN_LABEL_N` scored examples --
+       an empty or all-thin `per_label` is insufficient evidence, not a
+       passing report by default.
+    3. Every label that did reach that sample size met its ADR-018
+       precision/recall bar (`evaluate_agreement_thresholds`).
+
+    Any failure refuses the transition -- the record stays
+    `CONFORMANCE_PASSED`, per evaluator-registry.md, rather than raising: a
+    failed agreement report is an expected outcome, not a programming
+    error. `record.threshold_failures` carries the specific reasons either
+    way (empty on success), so a caller can inspect why a report was
+    refused instead of only seeing that it was.
     """
     if record.state != QualificationState.CONFORMANCE_PASSED:
         raise IllegalTransitionError(
             f"agreement reporting requires state=CONFORMANCE_PASSED, got {record.state.value}"
         )
+
+    failures: list[str] = []
     if adversarial_flips != 0:
-        return record
+        failures.append(
+            f"adversarial: {adversarial_flips} fixture(s) flipped to SUPPORTED (ADR-013 requires zero)"
+        )
+    if not _has_sufficient_sample_size(per_label):
+        failures.append(
+            f"insufficient sample size: no label reached ADR_018_MIN_LABEL_N={ADR_018_MIN_LABEL_N} "
+            "scored examples"
+        )
+    else:
+        failures.extend(evaluate_agreement_thresholds(per_label))
+
+    if failures:
+        return replace(record, threshold_failures=tuple(failures))
+
     return replace(
         record,
         state=QualificationState.AGREEMENT_REPORTED,
         dataset_version=dataset_version,
         adversarial_flips=adversarial_flips,
+        threshold_failures=(),
     )
 
 

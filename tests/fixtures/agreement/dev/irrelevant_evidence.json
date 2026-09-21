@@ -1,0 +1,29 @@
+[
+  {
+    "fixture_id": "irrelevant_1",
+    "family": "irrelevant_evidence",
+    "claim": {"claim_id": "ir1", "text": "Paris is the capital of France."},
+    "evidence": [
+      {"evidence_id": "ir1_e1", "content": "Paris Hilton is a well-known American media personality."}
+    ],
+    "expected_verdict": "UNSUPPORTED"
+  },
+  {
+    "fixture_id": "irrelevant_2",
+    "family": "irrelevant_evidence",
+    "claim": {"claim_id": "ir2", "text": "The stock market fell sharply on Monday."},
+    "evidence": [
+      {"evidence_id": "ir2_e1", "content": "On Monday, the local farmers market featured fresh produce and live music."}
+    ],
+    "expected_verdict": "UNSUPPORTED"
+  },
+  {
+    "fixture_id": "irrelevant_3",
+    "family": "irrelevant_evidence",
+    "claim": {"claim_id": "ir3", "text": "Tesla's Model 3 has a range of 300 miles."},
+    "evidence": [
+      {"evidence_id": "ir3_e1", "content": "Nikola Tesla was a pioneering electrical engineer known for his work on AC power systems."}
+    ],
+    "expected_verdict": "UNSUPPORTED"
+  }
+]

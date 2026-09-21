@@ -1,0 +1,27 @@
+[
+  {
+    "fixture_id": "insufficient_1",
+    "family": "insufficient_evidence",
+    "claim": {"claim_id": "in1", "text": "Paris is the capital of France."},
+    "evidence": [],
+    "expected_verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  {
+    "fixture_id": "insufficient_2",
+    "family": "insufficient_evidence",
+    "claim": {"claim_id": "in2", "text": "The new drug reduces symptoms in most patients."},
+    "evidence": [
+      {"evidence_id": "in2_e1", "content": "A clinical trial studied the drug's effects on a small group of volunteers over six weeks."}
+    ],
+    "expected_verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  {
+    "fixture_id": "insufficient_3",
+    "family": "insufficient_evidence",
+    "claim": {"claim_id": "in3", "text": "The bridge can safely support heavy trucks."},
+    "evidence": [
+      {"evidence_id": "in3_e1", "content": "Engineers inspected the bridge last spring as part of a routine maintenance schedule."}
+    ],
+    "expected_verdict": "INSUFFICIENT_EVIDENCE"
+  }
+]

@@ -1,0 +1,29 @@
+[
+  {
+    "fixture_id": "ambiguous_1",
+    "family": "ambiguous",
+    "claim": {"claim_id": "amb1", "text": "The policy was effective."},
+    "evidence": [
+      {"evidence_id": "amb1_e1", "content": "Some analysts noted improvements in certain regions, while others pointed to persistent problems elsewhere."}
+    ],
+    "expected_verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  {
+    "fixture_id": "ambiguous_2",
+    "family": "ambiguous",
+    "claim": {"claim_id": "amb2", "text": "The actor gave a great performance."},
+    "evidence": [
+      {"evidence_id": "amb2_e1", "content": "Critics were divided: several praised the emotional depth, while others found the delivery overly theatrical."}
+    ],
+    "expected_verdict": "INSUFFICIENT_EVIDENCE"
+  },
+  {
+    "fixture_id": "ambiguous_3",
+    "family": "ambiguous",
+    "claim": {"claim_id": "amb3", "text": "The new policy will likely reduce costs."},
+    "evidence": [
+      {"evidence_id": "amb3_e1", "content": "Cost projections vary widely depending on assumptions about adoption rates, which remain uncertain."}
+    ],
+    "expected_verdict": "INSUFFICIENT_EVIDENCE"
+  }
+]

@@ -1,0 +1,29 @@
+[
+  {
+    "fixture_id": "negation_contradiction_1",
+    "family": "negation_contradiction",
+    "claim": {"claim_id": "neg1", "text": "The vaccine is safe for children under five."},
+    "evidence": [
+      {"evidence_id": "neg1_e1", "content": "The vaccine is not safe for children under five."}
+    ],
+    "expected_verdict": "CONTRADICTED"
+  },
+  {
+    "fixture_id": "negation_contradiction_2",
+    "family": "negation_contradiction",
+    "claim": {"claim_id": "neg2", "text": "The bridge was completed on schedule."},
+    "evidence": [
+      {"evidence_id": "neg2_e1", "content": "The bridge was not completed on schedule."}
+    ],
+    "expected_verdict": "CONTRADICTED"
+  },
+  {
+    "fixture_id": "negation_contradiction_3",
+    "family": "negation_contradiction",
+    "claim": {"claim_id": "neg3", "text": "The defendant was present at the scene."},
+    "evidence": [
+      {"evidence_id": "neg3_e1", "content": "The defendant was never present at the scene."}
+    ],
+    "expected_verdict": "CONTRADICTED"
+  }
+]

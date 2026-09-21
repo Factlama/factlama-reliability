@@ -1,0 +1,29 @@
+[
+  {
+    "fixture_id": "numerical_contradiction_1",
+    "family": "numerical_temporal_contradiction",
+    "claim": {"claim_id": "nc1", "text": "Product X weighs 3.4 kg."},
+    "evidence": [
+      {"evidence_id": "nc1_e1", "content": "Product X weighs 2.4 kg."}
+    ],
+    "expected_verdict": "CONTRADICTED"
+  },
+  {
+    "fixture_id": "temporal_contradiction_1",
+    "family": "numerical_temporal_contradiction",
+    "claim": {"claim_id": "nc2", "text": "World War II ended in 1945."},
+    "evidence": [
+      {"evidence_id": "nc2_e1", "content": "World War II came to an end in 1943."}
+    ],
+    "expected_verdict": "CONTRADICTED"
+  },
+  {
+    "fixture_id": "numerical_contradiction_2",
+    "family": "numerical_temporal_contradiction",
+    "claim": {"claim_id": "nc3", "text": "The company reported revenue of 10 million dollars in 2023."},
+    "evidence": [
+      {"evidence_id": "nc3_e1", "content": "The company reported revenue of 15 million dollars in 2023."}
+    ],
+    "expected_verdict": "CONTRADICTED"
+  }
+]
