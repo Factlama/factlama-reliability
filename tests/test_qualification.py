@@ -6,6 +6,7 @@ import pytest
 
 from core.qualification import (
     ADR_018_MIN_LABEL_N,
+    ADR_018_THRESHOLDS,
     IllegalTransitionError,
     QualificationRecord,
     QualificationState,
@@ -229,6 +230,42 @@ class TestADR018QualificationThreshold:
         assert any(
             "leakage-control attestation missing" in reason for reason in result.threshold_failures
         )
+
+    def test_nan_precision_refuses_the_report_instead_of_silently_passing(self) -> None:
+        """Regression: `float("nan") < 0.8` is `False` in Python, so the old
+        `precision < min_precision` check let a NaN precision through as if
+        it cleared the bar. A non-finite metric must refuse the report."""
+        record = mark_conformance_passed(_record())
+        per_label = _passing_per_label()
+        per_label["SUPPORTED"] = {
+            "precision": float("nan"),
+            "recall": float("nan"),
+            "f1": None,
+            "n": 6,
+        }
+        result = report_agreement(record, **_passing_kwargs(per_label=per_label))
+        assert result.state == QualificationState.CONFORMANCE_PASSED
+        assert any("not a valid probability" in reason for reason in result.threshold_failures)
+
+    def test_out_of_range_precision_refuses_the_report(self) -> None:
+        record = mark_conformance_passed(_record())
+        per_label = _passing_per_label()
+        per_label["CONTRADICTED"] = {"precision": 1.4, "recall": 0.9, "f1": 0.9, "n": 6}
+        result = report_agreement(record, **_passing_kwargs(per_label=per_label))
+        assert result.state == QualificationState.CONFORMANCE_PASSED
+        assert any("not a valid probability" in reason for reason in result.threshold_failures)
+
+    def test_all_four_labels_with_nan_metrics_does_not_reach_agreement_reported(self) -> None:
+        """The exact scenario the reviewer reproduced: every label carries
+        NaN precision/recall at a passing `n`. Must not qualify."""
+        record = mark_conformance_passed(_record())
+        per_label = {
+            label: {"precision": float("nan"), "recall": float("nan"), "f1": None, "n": 6}
+            for label in ADR_018_THRESHOLDS
+        }
+        result = report_agreement(record, **_passing_kwargs(per_label=per_label))
+        assert result.state == QualificationState.CONFORMANCE_PASSED
+        assert result.threshold_failures != ()
 
     def test_a_fully_passing_report_has_no_threshold_failures(self) -> None:
         record = mark_conformance_passed(_record())

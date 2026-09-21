@@ -17,6 +17,7 @@ label set. Only a real agreement report (`evaluator-agreement-harness.md`)
 can advance a `QualificationRecord` past `CONFORMANCE_PASSED`.
 """
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -63,6 +64,24 @@ def _undersampled_labels(per_label: Mapping[str, Mapping[str, float | int | None
     return missing
 
 
+def _invalid_metric(value: float | int | None) -> bool:
+    """True if `value` cannot be a real precision/recall: missing,
+    non-numeric, NaN/infinite, or outside `[0, 1]`. A threshold comparison
+    against NaN is `False` either way in Python (`float("nan") < 0.8` is
+    `False`, and so is `>=`), so a corrupted or fabricated metric would
+    silently pass `precision < min_precision` instead of failing it -- this
+    check exists so a non-finite or out-of-range value refuses the report
+    instead of being compared as if it were a real probability.
+    """
+    if value is None:
+        return True
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return True
+    return not math.isfinite(numeric) or not (0.0 <= numeric <= 1.0)
+
+
 def evaluate_agreement_thresholds(
     per_label: Mapping[str, Mapping[str, float | int | None]],
 ) -> list[str]:
@@ -84,9 +103,15 @@ def evaluate_agreement_thresholds(
             continue
         precision = metrics.get("precision")
         recall = metrics.get("recall")
-        if precision is None or precision < min_precision:
+        if _invalid_metric(precision):
+            failures.append(
+                f"{label}: precision is not a valid probability ({precision!r}) (n={n})"
+            )
+        elif precision < min_precision:  # type: ignore[operator]
             failures.append(f"{label}: precision {precision} < {min_precision} (n={n})")
-        if recall is None or recall < min_recall:
+        if _invalid_metric(recall):
+            failures.append(f"{label}: recall is not a valid probability ({recall!r}) (n={n})")
+        elif recall < min_recall:  # type: ignore[operator]
             failures.append(f"{label}: recall {recall} < {min_recall} (n={n})")
     return failures
 

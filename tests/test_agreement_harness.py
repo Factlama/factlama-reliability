@@ -105,3 +105,49 @@ class TestScoreProvider:
         report = score_provider(RuleBasedProvider(), fixtures)
 
         assert report["adversarial"]["flipped_to_supported"] == 0
+
+    def test_providers_with_different_tunable_config_get_different_configuration_version(
+        self,
+    ) -> None:
+        """Regression: `pinned_model_id` alone (derived from `.name`) cannot
+        distinguish two same-model providers configured with different
+        tunable thresholds -- e.g. two `EmbeddingProvider`s at
+        `support_threshold=0.70` vs `0.95` are different evaluators but
+        previously produced identical report-identity fields."""
+
+        class _ConfigurableStub:
+            name = "stub:model-x"
+
+            def __init__(self, support_threshold: float) -> None:
+                self.support_threshold = support_threshold
+
+            def evaluate(self, request, deadline, cancellation):
+                return JudgeResult(verdict=ClaimVerdict.SUPPORTED, evidence_ids=[])
+
+        fixtures = [f for f in dev_fixtures() if f.family == "direct_support"][:1]
+        report_a = score_provider(_ConfigurableStub(support_threshold=0.70), fixtures)
+        report_b = score_provider(_ConfigurableStub(support_threshold=0.95), fixtures)
+        report_a_again = score_provider(_ConfigurableStub(support_threshold=0.70), fixtures)
+
+        assert report_a["pinned_model_id"] == report_b["pinned_model_id"]
+        assert report_a["configuration_version"] is not None
+        assert report_a["configuration_version"] != report_b["configuration_version"]
+        assert report_a["configuration_version"] == report_a_again["configuration_version"]
+
+    def test_provider_with_no_public_state_gets_no_configuration_version(self) -> None:
+        fixtures = [f for f in dev_fixtures() if f.family == "adversarial_injection"]
+        report = score_provider(_AlwaysSupportedProvider(), fixtures)
+        assert report["configuration_version"] is None
+
+    def test_rule_based_providers_with_different_thresholds_are_distinguished(self) -> None:
+        """RuleBasedProvider itself carries public `support_threshold`/
+        `contradiction_threshold` state -- confirm the fingerprint actually
+        distinguishes two real, differently-configured instances of it, not
+        just the stub above."""
+        fixtures = [f for f in dev_fixtures() if f.family == "direct_support"][:1]
+        default_report = score_provider(RuleBasedProvider(), fixtures)
+        retuned_report = score_provider(
+            RuleBasedProvider(support_threshold=0.5, contradiction_threshold=0.9), fixtures
+        )
+        assert default_report["configuration_version"] is not None
+        assert default_report["configuration_version"] != retuned_report["configuration_version"]

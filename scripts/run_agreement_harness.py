@@ -221,17 +221,16 @@ def score_provider(
     # "<kind>:<model_name>" (judges/vendor_adapters.py), so the part after
     # the colon is a real, non-fabricated pinned_model_id; providers with no
     # colon (Mock, RuleBased) have no underlying pinned model, so it is
-    # honestly None rather than guessed. configuration_version and
-    # calibration_class are not tracked by any provider today -- reported as
-    # None rather than invented, per evaluator-agreement-harness.md's report
-    # schema, which lists both fields.
+    # honestly None rather than guessed. calibration_class is not tracked by
+    # any provider today -- reported as None rather than invented, per
+    # evaluator-agreement-harness.md's report schema, which lists it.
     pinned_model_id = provider.name.split(":", 1)[1] if ":" in provider.name else None
 
     return {
         "report_version": "0.1",
         "provider_id": provider.name,
         "pinned_model_id": pinned_model_id,
-        "configuration_version": None,
+        "configuration_version": _configuration_fingerprint(provider),
         "calibration_class": None,
         "dataset_version": DATASET_VERSION,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -253,6 +252,28 @@ def score_provider(
         "usage": {"total_tokens": None, "cost": {"status": "UNAVAILABLE"}},
         "adr_018_threshold_failures": threshold_failures,
     }
+
+
+def _configuration_fingerprint(provider: JudgeProvider) -> str | None:
+    """A real, non-fabricated identity signal for whatever tunable state the
+    provider exposes as public instance attributes -- e.g. two
+    `EmbeddingProvider`s with the same `model_name` but different
+    `support_threshold`/`contradiction_threshold` are different evaluators
+    and must not produce reports with an identical `pinned_model_id` and no
+    other distinguishing field. Derived only from the provider's own public
+    (`vars()`, non-underscore, non-callable) state, not invented: `Mock`/
+    `RuleBasedProvider` carry no such state today and get `None`, not a
+    fabricated version string.
+    """
+    public_state = {
+        key: value
+        for key, value in vars(provider).items()
+        if not key.startswith("_") and not callable(value)
+    }
+    if not public_state:
+        return None
+    encoded = json.dumps(public_state, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
 
 def _embedding_provider() -> JudgeProvider:
