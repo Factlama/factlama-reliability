@@ -4,6 +4,8 @@ reaches a judge -- plus the evidence-injection defense-in-depth signal and
 explicit-claims mode.
 """
 
+import time
+
 import pytest
 from pydantic import ValidationError
 
@@ -416,6 +418,184 @@ class TestVerifierUsageBudgetGate:
         assert result.status == ResultStatus.COMPLETED
         assert len(result.provenance.attempts) == 3
         assert result.usage_summary.total_tokens == 30
+
+
+class _RaisesOnSecondCallProvider(JudgeProvider):
+    """Completes normally with real usage, then raises an unexpected
+    exception on its second call -- F5 of the 2026-09-21 G0-G4 validation
+    report's exact reproduction shape: "a provider completed the first claim
+    with 12 tokens and USD 0.01, then raised on the second.\""""
+
+    def __init__(self) -> None:
+        self._calls = 0
+
+    @property
+    def name(self) -> str:
+        return "raises-on-second-call"
+
+    def evaluate(
+        self, request: JudgeRequest, deadline: float, cancellation: CancellationToken
+    ) -> JudgeResult:
+        self._calls += 1
+        if self._calls == 2:
+            raise RuntimeError("simulated adapter crash")
+        return JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence_ids=[request.evidence[0].evidence_id],
+            usage=Usage(total_tokens=12, cost=Cost(status="MEASURED", amount=0.01, currency="USD")),
+        )
+
+    @property
+    def compliance_tags(self) -> frozenset[str]:
+        return frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"})
+
+
+class TestAttemptPreservationAcrossPerClaimException:
+    """F5 of the 2026-09-21 G0-G4 validation report: an unexpected exception
+    raised while dispatching one claim must not erase an earlier claim's
+    already-completed attempt and known usage from the returned result."""
+
+    def test_first_claims_completed_attempt_and_usage_survive_a_later_exception(self) -> None:
+        claims = [
+            Claim(claim_id="c1", text="Paris is the capital of France."),
+            Claim(claim_id="c2", text="Paris is the capital of France."),
+        ]
+        verifier = Verifier(
+            claim_extractor=_FixedClaimExtractor(claims),
+            model_provider=_RaisesOnSecondCallProvider(),
+        )
+        request = VerificationRequest(
+            request_id="req_partial_exception",
+            project_id="p1",
+            application_id="a1",
+            answer="irrelevant, extractor is stubbed",
+            evidence=[Evidence(evidence_id="e1", content="Paris is the capital of France.")],
+        )
+
+        result = verifier.verify(request, tenant_id="t1")
+
+        # Previously: the whole pipeline's outer exception handler replaced
+        # the entire attempt history with one synthetic failure, losing the
+        # first claim's completed attempt and its 12 tokens/$0.01 entirely.
+        assert len(result.provenance.attempts) == 2
+        assert result.provenance.attempts[0].outcome == AttemptOutcome.COMPLETED
+        assert result.provenance.attempts[1].outcome == AttemptOutcome.FAILED
+        assert result.usage_summary.total_tokens == 12
+        assert result.usage_summary.cost.amount == 0.01
+        assert result.usage_summary.cost.status == "MEASURED"
+
+
+class TestVerifierLateProviderResult:
+    """F3 of the 2026-09-21 G0-G4 validation report: a provider's deadline
+    was previously advisory only -- checked before dispatch, never enforced
+    against how long the call actually took."""
+
+    def test_provider_returning_after_its_deadline_is_rejected_not_trusted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import core.verifier as verifier_module
+
+        monkeypatch.setattr(verifier_module, "DEFAULT_JUDGE_TIMEOUT_SECONDS", 0.01)
+
+        class _SlowProvider(JudgeProvider):
+            @property
+            def name(self) -> str:
+                return "slow-provider"
+
+            def evaluate(
+                self, request: JudgeRequest, deadline: float, cancellation: CancellationToken
+            ) -> JudgeResult:
+                time.sleep(0.05)
+                return JudgeResult(
+                    verdict=ClaimVerdict.SUPPORTED,
+                    evidence_ids=[request.evidence[0].evidence_id],
+                )
+
+            @property
+            def compliance_tags(self) -> frozenset[str]:
+                return frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"})
+
+        claims = [Claim(claim_id="c1", text="Paris is the capital of France.")]
+        verifier = Verifier(
+            claim_extractor=_FixedClaimExtractor(claims), model_provider=_SlowProvider()
+        )
+        request = VerificationRequest(
+            request_id="req_late_result",
+            project_id="p1",
+            application_id="a1",
+            answer="irrelevant, extractor is stubbed",
+            evidence=[Evidence(evidence_id="e1", content="Paris is the capital of France.")],
+        )
+
+        result = verifier.verify(request, tenant_id="t1")
+
+        assert len(result.provenance.attempts) == 1
+        assert result.provenance.attempts[0].outcome == AttemptOutcome.FAILED
+        assert result.provenance.attempts[0].error == "TIMEOUT"
+        # Never a factual PASS built from a result the provider returned too late.
+        assert result.verdict != OverallVerdict.PASS
+
+
+class TestVerifierOverallRequestDeadline:
+    """F3: distinct from the per-claim deadline above -- bounds the whole
+    multi-claim dispatch loop's cumulative wall-clock time, not just each
+    individual call."""
+
+    def test_overall_deadline_stops_dispatch_and_preserves_earlier_attempts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import core.verifier as verifier_module
+
+        monkeypatch.setattr(verifier_module, "DEFAULT_REQUEST_TIMEOUT_SECONDS", 0.05)
+
+        # A deterministic fake clock (rather than real sleeps) so this test
+        # is not flaky under CI scheduling jitter: each `time.monotonic()`
+        # call the Verifier makes advances the clock by a fixed step.
+        clock = {"t": 0.0}
+
+        def fake_monotonic() -> float:
+            clock["t"] += 0.03
+            return clock["t"]
+
+        monkeypatch.setattr(verifier_module.time, "monotonic", fake_monotonic)
+
+        class _FastProvider(JudgeProvider):
+            @property
+            def name(self) -> str:
+                return "fast-provider"
+
+            def evaluate(
+                self, request: JudgeRequest, deadline: float, cancellation: CancellationToken
+            ) -> JudgeResult:
+                return JudgeResult(
+                    verdict=ClaimVerdict.SUPPORTED,
+                    evidence_ids=[request.evidence[0].evidence_id],
+                )
+
+            @property
+            def compliance_tags(self) -> frozenset[str]:
+                return frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"})
+
+        claims = [Claim(claim_id=f"c{i}", text="Paris is the capital of France.") for i in range(3)]
+        verifier = Verifier(
+            claim_extractor=_FixedClaimExtractor(claims), model_provider=_FastProvider()
+        )
+        request = VerificationRequest(
+            request_id="req_overall_deadline",
+            project_id="p1",
+            application_id="a1",
+            answer="irrelevant, extractor is stubbed",
+            evidence=[Evidence(evidence_id="e1", content="Paris is the capital of France.")],
+        )
+
+        result = verifier.verify(request, tenant_id="t1")
+
+        assert result.status == ResultStatus.ABSTAINED
+        assert result.abstention_reason == AbstentionReason.BUDGET_EXHAUSTED
+        # Only the first claim was ever dispatched -- the overall deadline
+        # (patched to a tiny budget) was already exhausted before a second
+        # claim could be sent, and the remaining two were never dispatched.
+        assert len(result.provenance.attempts) == 1
 
 
 class TestProviderCompliance:

@@ -159,11 +159,50 @@ _CITATION_OVERLAP_STOPWORDS = {
 }
 
 
+#: F7 of the 2026-09-21 G0-G4 validation report: a *purely* lexical overlap
+#: check downgrades any claim/evidence pair that shares zero raw tokens, even
+#: when they are a legitimate paraphrase (e.g. "The physician purchased an
+#: automobile." vs. "The doctor bought a car." -- zero shared tokens, but the
+#: same claim). CONTRACTS.md is explicit that this is not allowed: "legitimate
+#: paraphrase is not rejected solely for lacking shared words." Each group
+#: below is a small, hand-curated, versioned set of near-synonyms mapped to a
+#: shared canonical token before overlap is computed -- deliberately
+#: non-exhaustive: this guard's job is catching evidence that shares
+#: *nothing at all* with the claim, not proving semantic equivalence (that
+#: remains the judge's job, not this deterministic guard's). Additive: a new
+#: group requires a version note here, the same convention CONTRACTS.md uses
+#: for its own versioned vocabularies.
+_CITATION_OVERLAP_SYNONYMS_V1: tuple[frozenset[str], ...] = (
+    frozenset({"physician", "physicians", "doctor", "doctors", "gp"}),
+    frozenset({"automobile", "automobiles", "car", "cars", "vehicle", "vehicles"}),
+    frozenset(
+        {"purchase", "purchased", "purchases", "buy", "buys", "bought", "acquire", "acquired"}
+    ),
+    frozenset({"company", "companies", "firm", "firms", "corporation", "corporations", "business"}),
+    frozenset(
+        {"began", "begin", "start", "started", "commence", "commenced", "founded", "founding"}
+    ),
+    frozenset({"ceo", "chief", "executive"}),
+    frozenset({"employee", "employees", "staff", "worker", "workers"}),
+    frozenset({"large", "big", "sizable", "substantial"}),
+    frozenset({"small", "tiny", "minor"}),
+    frozenset({"increase", "increased", "rise", "rose", "grew", "grow", "growth"}),
+    frozenset({"decrease", "decreased", "fall", "fell", "declined", "decline", "drop", "dropped"}),
+)
+
+_CITATION_OVERLAP_SYNONYM_CANONICAL: dict[str, str] = {
+    word: min(group) for group in _CITATION_OVERLAP_SYNONYMS_V1 for word in group
+}
+
+
 def _content_words(text: str) -> set[str]:
-    """Lowercased alphanumeric tokens with common stopwords removed."""
-    return {
+    """Lowercased alphanumeric tokens with common stopwords removed, then
+    canonicalized through `_CITATION_OVERLAP_SYNONYMS_V1` so a recognized
+    near-synonym pair counts as overlap."""
+    tokens = {
         w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in _CITATION_OVERLAP_STOPWORDS
     }
+    return {_CITATION_OVERLAP_SYNONYM_CANONICAL.get(w, w) for w in tokens}
 
 
 def apply_citation_support_check(

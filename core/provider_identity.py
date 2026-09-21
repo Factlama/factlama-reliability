@@ -1,0 +1,64 @@
+"""Shared provider-identity primitives for ADR-010's calibration-class inputs.
+
+Both the live `Verifier` (core.verifier) and the offline agreement harness
+(scripts/run_agreement_harness.py) must derive a judge attempt's identity
+from the *same* underlying signals -- a real adapter instance's resolved
+model revision and tunable configuration (e.g. `EmbeddingProvider.
+support_threshold`), not just its `.name`, which collapses two
+differently-configured instances of the same model into one identity. F2 of
+the 2026-09-21 G0-G4 validation report: two real `EmbeddingProvider`
+instances at support thresholds 0.70 and 0.95 previously produced the same
+`configuration_version`/`calibration_class` because only `.name` (constant
+across both) and a hardcoded default fed `derive_calibration_class()`.
+"""
+
+import hashlib
+import json
+
+from judges.port import JudgeProvider
+
+#: Used when a provider exposes no public tunable state to fingerprint
+#: (`Mock`/`RuleBasedProvider` today) -- a stable, honest baseline, not a
+#: fabricated version string.
+DEFAULT_CONFIGURATION_VERSION = "0.1"
+
+
+def model_id(provider: JudgeProvider) -> str | None:
+    """The base model name from a vendor adapter's "<kind>:<model_name>"
+    `.name` convention (judges/vendor_adapters.py) -- e.g.
+    "sentence-transformers/all-MiniLM-L6-v2". `None` for a provider with no
+    underlying pinned model (`Mock`/`RuleBasedProvider` have no colon in
+    `.name`), never guessed.
+    """
+    return provider.name.split(":", 1)[1] if ":" in provider.name else None
+
+
+def pinned_model_version(provider: JudgeProvider) -> str | None:
+    """The immutable resolved model revision, when the adapter can report
+    one (`EmbeddingProvider`/`NLIProvider` expose `resolved_revision` once
+    their model has loaded) -- `model_id()` alone may be a floating ref (a
+    branch/tag), not an immutable pin. `None` before the model loads, or for
+    a provider with no such property.
+    """
+    return getattr(provider, "resolved_revision", None)
+
+
+def configuration_fingerprint(provider: JudgeProvider) -> str | None:
+    """A real, non-fabricated identity signal for whatever tunable state the
+    provider exposes as public instance attributes -- e.g. two
+    `EmbeddingProvider`s with the same `model_name` but different
+    `support_threshold`/`contradiction_threshold` are different evaluators
+    and must not collapse to the same calibration class. Derived only from
+    the provider's own public (`vars()`, non-underscore, non-callable)
+    state, not invented: a provider with no such state (`Mock`/
+    `RuleBasedProvider` today) gets `None`, not a fabricated version string.
+    """
+    public_state = {
+        key: value
+        for key, value in vars(provider).items()
+        if not key.startswith("_") and not callable(value)
+    }
+    if not public_state:
+        return None
+    encoded = json.dumps(public_state, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode()).hexdigest()[:16]

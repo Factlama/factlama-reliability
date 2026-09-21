@@ -121,6 +121,31 @@ def _enforce_content_length_limit(request: Request, max_body_bytes: int) -> None
         )
 
 
+async def _read_body_within_limit(request: Request, max_body_bytes: int) -> bytes:
+    """Stream the body, aborting as soon as more than `max_body_bytes` have
+    actually been received.
+
+    F3 of the 2026-09-21 G0-G4 validation report: `request.body()` buffers
+    the *entire* payload into memory before any length check runs. When
+    `Content-Length` is absent or understates the real size (both entirely
+    under the client's control), `_enforce_content_length_limit`'s fast-path
+    check above never fires, and the only remaining guard was a check
+    performed *after* that full buffering -- by then the oversized payload
+    was already fully resident in memory regardless.
+    """
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > max_body_bytes:
+            raise ApiError(
+                ApiErrorCode.PAYLOAD_TOO_LARGE,
+                f"request body exceeds the {max_body_bytes}-byte limit",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.post("/v0.1/verifications")
 async def create_verification(
     request: Request,
@@ -131,22 +156,21 @@ async def create_verification(
     _require_json_content_type(request)
     _enforce_content_length_limit(request, settings.max_body_bytes)
 
-    body = await request.body()
-    if len(body) > settings.max_body_bytes:
-        raise ApiError(
-            ApiErrorCode.PAYLOAD_TOO_LARGE,
-            f"request body of {len(body)} bytes exceeds the {settings.max_body_bytes}-byte limit",
-        )
+    body = await _read_body_within_limit(request, settings.max_body_bytes)
 
     try:
         verification_request = VerificationRequest.model_validate_json(body)
     except ValidationError as exc:
         message = _validation_error_message(exc)
-        code = (
-            ApiErrorCode.UNSUPPORTED_VERSION
-            if "Unsupported schema version" in message
-            else ApiErrorCode.INVALID_ARGUMENT
-        )
+        if "Unsupported schema version" in message:
+            code = ApiErrorCode.UNSUPPORTED_VERSION
+        elif "policy_id cannot be resolved" in message:
+            # CONTRACTS.md: "NOT_FOUND is used for inaccessible tenant-scoped
+            # resources" -- a policy_id names exactly such a resource, not a
+            # structurally malformed argument.
+            code = ApiErrorCode.NOT_FOUND
+        else:
+            code = ApiErrorCode.INVALID_ARGUMENT
         raise ApiError(code, message) from exc
 
     if not tenant_context.authorizes(
@@ -171,4 +195,7 @@ async def create_verification(
     result = await run_in_threadpool(
         verifier.verify, verification_request, tenant_id=tenant_context.tenant_id
     )
-    return JSONResponse(status_code=200, content=result.model_dump(mode="json"))
+    # exclude_none: contracts/v0.1 requires several optional fields (e.g. an
+    # unmeasured ScoreValue.value) to be absent, not present as null -- see
+    # CONTRACTS.md: "null means known absent; omitted means not supplied."
+    return JSONResponse(status_code=200, content=result.model_dump(mode="json", exclude_none=True))

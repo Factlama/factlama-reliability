@@ -1,5 +1,8 @@
 """Tests for the main Verifier."""
 
+import pytest
+from pydantic import ValidationError
+
 from core import verify
 from core.verifier import Verifier
 from judges.port import JudgeProvider, JudgeRequest, JudgeResult
@@ -288,6 +291,103 @@ class TestResponseValidation:
         assert all(a.error == "INVALID_RESPONSE" for a in result.provenance.attempts)
         # Never UNSUPPORTED/FAIL from an infrastructure/response-validation failure.
         assert result.verdict != OverallVerdict.FAIL
+
+
+class TestProviderIdentityInAttempts:
+    """F2 of the 2026-09-21 G0-G4 validation report: `Attempt.model_id`/
+    `pinned_model_version`/`configuration_version`/`calibration_class` must
+    reflect the real provider instance's identity -- including its own
+    tunable configuration, which `.name` alone does not capture -- not a
+    value shared by every differently-configured instance of it. Real
+    `EmbeddingProvider` instances at support thresholds 0.70 and 0.95
+    previously produced identical `configuration_version`/`calibration_class`
+    because only `.name` (constant across both) fed calibration derivation."""
+
+    class _ConfigurableProvider(JudgeProvider):
+        """Same `.name` regardless of `support_threshold` -- mirrors
+        `EmbeddingProvider`'s own naming convention, where `.name` is
+        `f"embedding:{model_name}"` and does not vary with tunable
+        thresholds."""
+
+        name = "configurable:model-x"
+
+        def __init__(self, support_threshold: float) -> None:
+            self.support_threshold = support_threshold
+
+        def evaluate(self, request: JudgeRequest, deadline: float, cancellation) -> JudgeResult:
+            return JudgeResult(
+                verdict=ClaimVerdict.SUPPORTED, evidence_ids=[request.evidence[0].evidence_id]
+            )
+
+        @property
+        def compliance_tags(self) -> frozenset[str]:
+            return frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"})
+
+    def test_differently_configured_providers_get_different_identity(self) -> None:
+        evidence = [Evidence(evidence_id="e1", content="Paris is the capital of France.")]
+        result_a = Verifier(
+            model_provider=self._ConfigurableProvider(support_threshold=0.70)
+        ).verify(_request(answer="Paris is the capital of France.", evidence=evidence))
+        result_b = Verifier(
+            model_provider=self._ConfigurableProvider(support_threshold=0.95)
+        ).verify(_request(answer="Paris is the capital of France.", evidence=evidence))
+
+        attempt_a = result_a.provenance.attempts[0]
+        attempt_b = result_b.provenance.attempts[0]
+        assert attempt_a.configuration_version != attempt_b.configuration_version
+        assert attempt_a.calibration_class != attempt_b.calibration_class
+
+    def test_model_id_and_pinned_version_populated_when_provider_exposes_them(self) -> None:
+        class _PinnedProvider(JudgeProvider):
+            name = "embedding:some/model"
+            resolved_revision = "abc123deadbeef"
+
+            def evaluate(self, request: JudgeRequest, deadline: float, cancellation) -> JudgeResult:
+                return JudgeResult(
+                    verdict=ClaimVerdict.SUPPORTED, evidence_ids=[request.evidence[0].evidence_id]
+                )
+
+            @property
+            def compliance_tags(self) -> frozenset[str]:
+                return frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"})
+
+        result = Verifier(model_provider=_PinnedProvider()).verify(
+            _request(
+                answer="Paris is the capital of France.",
+                evidence=[Evidence(evidence_id="e1", content="Paris is the capital of France.")],
+            )
+        )
+
+        attempt = result.provenance.attempts[0]
+        assert attempt.model_id == "some/model"
+        assert attempt.pinned_model_version == "abc123deadbeef"
+
+    def test_provider_with_no_pinned_model_gets_none_not_guessed(self) -> None:
+        """Mock/RuleBased-shaped providers (no colon in `.name`) have no
+        underlying pinned model -- `model_id`/`pinned_model_version` must
+        stay honestly `None`, never fabricated."""
+        result = Verifier(model_provider=RuleBasedProvider()).verify(
+            _request(
+                answer="Paris is the capital of France.",
+                evidence=[Evidence(evidence_id="e1", content="Paris is the capital of France.")],
+            )
+        )
+
+        attempt = result.provenance.attempts[0]
+        assert attempt.model_id is None
+        assert attempt.pinned_model_version is None
+
+
+class TestPolicyReferenceRejection:
+    """F4 of the 2026-09-21 G0-G4 validation report: no tenant-scoped policy
+    registry/lookup exists yet, so a request naming a `policy_id` was
+    previously silently served under the default policy instead of being
+    rejected -- a request for `policy_id="nonexistent-strict-policy"`
+    completed with action PASS under a policy the caller never got."""
+
+    def test_policy_id_is_rejected_at_request_construction(self) -> None:
+        with pytest.raises(ValidationError, match="policy_id cannot be resolved"):
+            _request(policy_id="nonexistent-strict-policy")
 
 
 class TestTenantIsolation:

@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from core import provider_identity
 from core.budgets import (
     check_request_budget,
     check_usage_budget,
@@ -21,9 +22,11 @@ from core.result import VerificationResultBuilder
 from core.scoring import ScoringEngine, derive_calibration_class, determine_verdict
 from judges.port import (
     CancellationToken,
+    JudgeError,
     JudgeErrorCode,
     JudgeProvider,
     JudgeRequest,
+    JudgeResult,
     apply_citation_support_check,
     detect_evidence_injection,
     validate_judge_result,
@@ -71,6 +74,14 @@ INSTRUCTION_ADHERENCE_THRESHOLD = 0.5
 # Per-claim judge dispatch deadline. ADR-012's claim/evidence fan-out and
 # usage/cost ceilings are enforced separately (core.budgets).
 DEFAULT_JUDGE_TIMEOUT_SECONDS = 30.0
+
+# Overall wall-clock ceiling for one request's entire judge-dispatch phase
+# (every claim combined), distinct from DEFAULT_JUDGE_TIMEOUT_SECONDS, which
+# only bounds a single claim's own call. F3 of the 2026-09-21 G0-G4
+# validation report: a multi-claim request previously had no total deadline,
+# so N claims each individually within budget could still run unbounded
+# cumulative wall-clock time.
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 60.0
 
 EVALUATOR_ID = "reliability-verifier"
 EVALUATOR_VERSION = "0.1"
@@ -137,6 +148,15 @@ class Verifier:
             interaction_id=request.interaction_id,
         )
         builder.with_trace_id(trace_id).with_span_id(span_id)
+
+        # F5 of the 2026-09-21 G0-G4 validation report: an exception raised
+        # downstream of claim dispatch (e.g. in scoring or policy
+        # evaluation) must not erase judge work already completed for this
+        # request. Declared outside the try block so the except handler
+        # below can still see whatever `_verify_claims()` actually returned,
+        # instead of discarding it in favor of one synthetic failure.
+        claim_verifications: list[ClaimVerification] = []
+        attempts: list[Attempt] = []
 
         try:
             policy = request.policy or Policy(id="default")
@@ -307,24 +327,40 @@ class Verifier:
                 "Unexpected pipeline failure during verification of request %s", request.request_id
             )
             completed_at = datetime.now(timezone.utc)
+            configuration_version = (
+                provider_identity.configuration_fingerprint(self.model_provider)
+                or provider_identity.DEFAULT_CONFIGURATION_VERSION
+            )
+            resolved_pinned_version = provider_identity.pinned_model_version(self.model_provider)
+            provider_model_id = provider_identity.model_id(self.model_provider)
             failure_attempt = Attempt(
                 attempt_id=f"attempt_{uuid.uuid4().hex[:12]}",
                 provider_id=self.model_provider.name,
-                configuration_version="0.1",
+                model_id=provider_model_id,
+                pinned_model_version=resolved_pinned_version,
+                configuration_version=configuration_version,
                 qualification_status=QualificationStatus.UNQUALIFIED,
                 calibration_class=derive_calibration_class(
                     evaluator_id=EVALUATOR_ID,
                     evaluator_version=EVALUATOR_VERSION,
                     provider_id=self.model_provider.name,
-                    pinned_model_id=self.model_provider.name,
-                    configuration_version="0.1",
-                    qualification_status="UNQUALIFIED",
+                    pinned_model_id=(
+                        resolved_pinned_version or provider_model_id or self.model_provider.name
+                    ),
+                    configuration_version=configuration_version,
+                    qualification_status=QualificationStatus.UNQUALIFIED.value,
                 ),
                 outcome=AttemptOutcome.FAILED,
                 error="CONFIGURATION",
                 started_at=started_at,
                 completed_at=completed_at,
             )
+            # F5 of the 2026-09-21 G0-G4 validation report: `attempts` and
+            # `claim_verifications` hold whatever real judge work completed
+            # before this exception (declared outside the try block above) --
+            # append the synthetic failure marker rather than replacing them,
+            # so a later exception never erases earlier known usage/cost.
+            all_attempts = [*attempts, failure_attempt]
             provenance = Provenance(
                 evaluator_id=EVALUATOR_ID,
                 evaluator_version=EVALUATOR_VERSION,
@@ -333,14 +369,16 @@ class Verifier:
                 routing_profile_version=f"{request.mode.value.lower()}-0.1",
                 started_at=started_at,
                 completed_at=completed_at,
-                attempts=[failure_attempt],
+                attempts=all_attempts,
             )
             return (
                 builder.with_status(ResultStatus.FAILED)
                 .with_abstention_reason(AbstentionReason.PROVIDER_FAILURE)
                 .with_verdict(OverallVerdict.ABSTAIN)
                 .with_scores(self.scoring_engine.calculate_scores([], calibration_class=None))
+                .with_claims(claim_verifications)
                 .with_provenance(provenance)
+                .with_usage_summary(summarize_usage(all_attempts))
                 .with_metadata({"failure": "internal pipeline error"})
                 .build()
             )
@@ -468,20 +506,45 @@ class Verifier:
             Tuple of (claim verifications, judge attempts, calibration class
             shared by every attempt -- or None when there were no claims to
             dispatch at all -- violations raised by the judge-boundary
-            citation checks below, and a usage-budget violation reason if
-            the request's cumulative usage/cost exceeded its per-request
-            ceiling partway through -- either because a completed attempt's
-            real usage pushed it over (`check_usage_budget`, after
-            dispatch) or because dispatching one more call could not be
-            reserved against what remains (`check_usage_reservation`,
-            before dispatch) -- in which case any remaining claims were
-            never dispatched).
+            citation checks below, and a budget violation reason if the
+            request's cumulative usage/cost exceeded its per-request ceiling,
+            or its overall wall-clock deadline (`DEFAULT_REQUEST_TIMEOUT_
+            SECONDS`) elapsed, partway through -- either because a completed
+            attempt's real usage pushed it over (`check_usage_budget`, after
+            dispatch), dispatching one more call could not be reserved
+            against what remains (`check_usage_reservation`, before
+            dispatch), or the request's total time budget was already spent
+            before the next claim could be dispatched -- in which case any
+            remaining claims were never dispatched).
         """
         verifications: list[ClaimVerification] = []
         attempts: list[Attempt] = []
         citation_violations: list[Violation] = []
         calibration_class: str | None = None
         usage_budget_violation: str | None = None
+
+        # F2 of the 2026-09-21 G0-G4 validation report: `self.model_provider.
+        # name` alone cannot distinguish two same-model providers configured
+        # with different tunable thresholds (e.g. two EmbeddingProviders at
+        # support_threshold=0.70 vs 0.95) -- use the same shared identity
+        # primitives the offline agreement harness uses instead. The
+        # provider's own tunable state is fixed for the lifetime of this
+        # Verifier call, so the fingerprint/model_id are computed once;
+        # `pinned_model_version` (a vendor adapter's resolved model
+        # revision) is re-read per attempt below since it only becomes
+        # available once the model has actually loaded.
+        provider_model_id = provider_identity.model_id(self.model_provider)
+        provider_configuration_version = (
+            provider_identity.configuration_fingerprint(self.model_provider)
+            or provider_identity.DEFAULT_CONFIGURATION_VERSION
+        )
+
+        # F3 of the 2026-09-21 G0-G4 validation report: this bounds the
+        # *whole* claim-dispatch loop's cumulative wall-clock time, not just
+        # each individual claim's own DEFAULT_JUDGE_TIMEOUT_SECONDS -- a
+        # request with many claims that each individually finish in time
+        # could previously still run unbounded in total.
+        request_deadline = time.monotonic() + DEFAULT_REQUEST_TIMEOUT_SECONDS
 
         for claim in claims:
             reservation_violation = check_usage_reservation(summarize_usage(attempts))
@@ -494,21 +557,87 @@ class Verifier:
                 )
                 break
 
-            cancellation = CancellationToken()
-            deadline = time.monotonic() + DEFAULT_JUDGE_TIMEOUT_SECONDS
-            judge_request = JudgeRequest(claim=claim, evidence=evidence)
+            now = time.monotonic()
+            if now > request_deadline:
+                usage_budget_violation = (
+                    f"overall request deadline of {DEFAULT_REQUEST_TIMEOUT_SECONDS}s "
+                    f"exceeded before dispatching claim {claim.claim_id}"
+                )
+                logger.warning(
+                    "Request deadline exceeded before dispatching claim %s", claim.claim_id
+                )
+                break
 
+            cancellation = CancellationToken()
+            # Bounded by whichever is sooner: this claim's own per-claim
+            # timeout, or what remains of the overall request deadline --
+            # otherwise a claim dispatched just before the request deadline
+            # could still run for another full DEFAULT_JUDGE_TIMEOUT_SECONDS.
+            deadline = min(now + DEFAULT_JUDGE_TIMEOUT_SECONDS, request_deadline)
+            judge_request = JudgeRequest(
+                claim=claim,
+                evidence=evidence,
+                configuration_version=provider_configuration_version,
+            )
+
+            attempt_started = datetime.now(timezone.utc)
+            try:
+                judge_result = self.model_provider.evaluate(judge_request, deadline, cancellation)
+            except Exception:
+                # F5 of the 2026-09-21 G0-G4 validation report: an
+                # unexpected exception from one claim's dispatch must not
+                # discard every attempt already completed for earlier claims
+                # in this same request -- normalize it into the same typed
+                # dispatch-failure shape a provider's own JudgeError already
+                # produces (handled by the `judge_result.error is not None`
+                # branch below), instead of letting it propagate and lose
+                # this loop's accumulated `verifications`/`attempts`.
+                logger.exception(
+                    "Judge provider '%s' raised unexpectedly evaluating claim %s",
+                    self.model_provider.name,
+                    claim.claim_id,
+                )
+                judge_result = JudgeResult(
+                    error=JudgeError(
+                        code=JudgeErrorCode.UNAVAILABLE,
+                        message="judge provider raised an unexpected exception",
+                    )
+                )
+            if judge_result.error is None and time.monotonic() > deadline:
+                # F3 of the 2026-09-21 G0-G4 validation report: a provider
+                # that returns a verdict *after* its own deadline must not
+                # be trusted as a normal success -- `bounded_check()` inside
+                # each T0 adapter only checks the deadline before its own
+                # model work starts, not once that work has actually
+                # finished, so a slow call could otherwise still land as
+                # COMPLETED/PASS.
+                logger.warning(
+                    "Judge provider '%s' returned after its deadline for claim %s; "
+                    "rejecting the late result",
+                    self.model_provider.name,
+                    claim.claim_id,
+                )
+                judge_result = JudgeResult(
+                    error=JudgeError(
+                        code=JudgeErrorCode.TIMEOUT,
+                        message="provider returned a result after its deadline",
+                    )
+                )
+            # Read after `evaluate()`: a vendor adapter's resolved model
+            # revision is only available once its model has actually loaded
+            # (`judges/vendor_adapters.py`'s `resolved_revision`), which may
+            # first happen during this very call.
+            resolved_pinned_version = provider_identity.pinned_model_version(self.model_provider)
             calibration_class = derive_calibration_class(
                 evaluator_id=EVALUATOR_ID,
                 evaluator_version=EVALUATOR_VERSION,
                 provider_id=self.model_provider.name,
-                pinned_model_id=self.model_provider.name,
+                pinned_model_id=(
+                    resolved_pinned_version or provider_model_id or self.model_provider.name
+                ),
                 configuration_version=judge_request.configuration_version,
                 qualification_status=QualificationStatus.UNQUALIFIED.value,
             )
-
-            attempt_started = datetime.now(timezone.utc)
-            judge_result = self.model_provider.evaluate(judge_request, deadline, cancellation)
             # Reject a SUPPORTED verdict citing no evidence ID, or an ID absent
             # from this request (a hallucinated citation), before trusting it.
             judge_result = validate_judge_result(judge_result, judge_request)
@@ -582,6 +711,8 @@ class Verifier:
                     Attempt(
                         attempt_id=attempt_id,
                         provider_id=self.model_provider.name,
+                        model_id=provider_model_id,
+                        pinned_model_version=resolved_pinned_version,
                         configuration_version=judge_request.configuration_version,
                         qualification_status=QualificationStatus.UNQUALIFIED,
                         calibration_class=calibration_class,
@@ -617,6 +748,8 @@ class Verifier:
                     Attempt(
                         attempt_id=attempt_id,
                         provider_id=self.model_provider.name,
+                        model_id=provider_model_id,
+                        pinned_model_version=resolved_pinned_version,
                         configuration_version=judge_request.configuration_version,
                         qualification_status=QualificationStatus.UNQUALIFIED,
                         calibration_class=calibration_class,

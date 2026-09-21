@@ -221,7 +221,7 @@ class TestVerificationRequest:
         assert request.evidence[0].evidence_id == "doc_001"
 
     def test_request_schema_version_validation(self) -> None:
-        """Test that unsupported schema versions are rejected."""
+        """Test that an unknown major schema version is rejected."""
         with pytest.raises(ValidationError, match="Unsupported schema version"):
             VerificationRequest(
                 request_id="req_001",
@@ -230,6 +230,18 @@ class TestVerificationRequest:
                 answer="Answer.",
                 schema_version="99.0",
             )
+
+    def test_request_unknown_minor_schema_version_is_accepted(self) -> None:
+        """contracts/v0.1: an unknown *minor* within the known major is
+        additive and must be accepted, not just the exact literal "0.1"."""
+        request = VerificationRequest(
+            request_id="req_001",
+            project_id="proj_001",
+            application_id="app_001",
+            answer="Answer.",
+            schema_version="0.2",
+        )
+        assert request.schema_version == "0.2"
 
 
 class TestVerificationResult:

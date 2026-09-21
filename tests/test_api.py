@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from api.app import (
     _enforce_content_length_limit,
+    _read_body_within_limit,
     _require_json_content_type,
     app,
     get_verifier,
@@ -231,6 +232,14 @@ class TestRequestValidation:
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "UNSUPPORTED_VERSION"
 
+    def test_unknown_minor_schema_version_is_accepted(self, client: TestClient) -> None:
+        """contracts/v0.1: an unknown minor within the known major (e.g.
+        "0.2") is additive and must not be rejected as unsupported."""
+        body = _valid_body()
+        body["schema_version"] = "0.2"
+        response = client.post("/v0.1/verifications", json=body, headers=_auth(TENANT_ONE_KEY))
+        assert response.status_code == 200
+
     def test_oversized_payload_is_413(self, client: TestClient) -> None:
         body = _valid_body()
         body["answer"] = "x" * 2_000_000
@@ -241,6 +250,42 @@ class TestRequestValidation:
         )
         assert response.status_code == 413
         assert response.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+
+    def test_streamed_oversized_payload_without_content_length_is_413(
+        self, client: TestClient
+    ) -> None:
+        """F3 of the 2026-09-21 G0-G4 validation report: `_enforce_content_
+        length_limit`'s fast-path check cannot catch a request sent without a
+        `Content-Length` header (e.g. chunked transfer encoding) -- this
+        exercises `_read_body_within_limit`'s streaming enforcement, the
+        only remaining guard for exactly this case (`TestClient`'s own ASGI
+        transport pre-buffers the request client-side regardless of server
+        behavior, so this cannot observe the memory-bound benefit directly,
+        only that the cap is still correctly enforced without a reliable
+        Content-Length to rely on)."""
+
+        def _chunks():
+            chunk = b"x" * 100_000
+            for _ in range(20):  # 2,000,000 bytes total, over the 1MB test limit
+                yield chunk
+
+        response = client.post(
+            "/v0.1/verifications",
+            content=_chunks(),
+            headers={**_auth(TENANT_ONE_KEY), "Content-Type": "application/json"},
+        )
+        assert response.status_code == 413
+        assert response.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+
+    def test_unresolvable_policy_id_is_404(self, client: TestClient) -> None:
+        """F4 of the 2026-09-21 G0-G4 validation report: no tenant-scoped
+        policy registry exists yet, so any `policy_id` is unresolvable and
+        must be rejected, not silently served under the default policy."""
+        body = _valid_body()
+        body["policy_id"] = "nonexistent-strict-policy"
+        response = client.post("/v0.1/verifications", json=body, headers=_auth(TENANT_ONE_KEY))
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "NOT_FOUND"
 
     def test_wrong_content_type_is_400_not_silently_accepted(self, client: TestClient) -> None:
         """API.md requires JSON content type; a text/plain body carrying
@@ -305,6 +350,50 @@ class TestContentLengthGuard:
     def test_within_limit_is_a_noop(self) -> None:
         request = self._FakeRequest({"content-length": "100"})
         _enforce_content_length_limit(request, max_body_bytes=1000)  # type: ignore[arg-type]
+
+
+class TestReadBodyWithinLimit:
+    """F3 of the 2026-09-21 G0-G4 validation report: `_read_body_within_
+    limit` unit-level -- `request.body()` would buffer an entire oversized
+    payload into memory before any check ran when Content-Length is absent
+    or understated. `TestClient`'s own ASGI transport pre-buffers a request
+    client-side regardless of server behavior (see `TestRequestValidation.
+    test_streamed_oversized_payload_without_content_length_is_413`'s
+    docstring), so a real regression test for "aborts without draining the
+    whole stream" needs a stream double the route never actually gets from
+    `TestClient`."""
+
+    class _FakeStreamingRequest:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = chunks
+            self.chunks_consumed = 0
+
+        async def stream(self):
+            for chunk in self._chunks:
+                self.chunks_consumed += 1
+                yield chunk
+
+    async def test_aborts_without_consuming_the_entire_stream(self) -> None:
+        chunks = [b"x" * 100_000] * 20  # 2,000,000 bytes total
+        request = self._FakeStreamingRequest(chunks)
+
+        with pytest.raises(ApiError) as exc_info:
+            await _read_body_within_limit(request, max_body_bytes=1_000_000)  # type: ignore[arg-type]
+
+        assert exc_info.value.code == ApiErrorCode.PAYLOAD_TOO_LARGE
+        # The critical regression check: the stream was not drained to
+        # completion -- the cap was enforced WHILE streaming, not after
+        # buffering everything first.
+        assert request.chunks_consumed < len(chunks)
+
+    async def test_returns_the_full_body_when_within_limit(self) -> None:
+        chunks = [b"x" * 100, b"y" * 100]
+        request = self._FakeStreamingRequest(chunks)
+
+        body = await _read_body_within_limit(request, max_body_bytes=1_000_000)  # type: ignore[arg-type]
+
+        assert body == b"x" * 100 + b"y" * 100
+        assert request.chunks_consumed == len(chunks)
 
 
 class TestJsonContentTypeGuard:

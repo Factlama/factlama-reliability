@@ -147,6 +147,40 @@ class TestCitationSupportCheck:
 
         assert changed is False
 
+    def test_does_not_reject_legitimate_paraphrase_with_zero_raw_token_overlap(self) -> None:
+        """F7 of the 2026-09-21 G0-G4 validation report's exact reproduction:
+        a claim and its cited evidence sharing *zero* raw tokens must still
+        pass when they are recognized near-synonyms, not just when they
+        happen to share a word."""
+        claim = Claim(claim_id="claim_001", text="The physician purchased an automobile.")
+        evidence = Evidence(evidence_id="doc_1", content="The doctor bought a car.")
+        request = JudgeRequest(claim=claim, evidence=[evidence])
+        result = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence_ids=["doc_1"],
+        )
+
+        _, changed = apply_citation_support_check(result, request)
+
+        assert changed is False
+
+    def test_still_downgrades_when_no_synonym_relates_the_two(self) -> None:
+        """The synonym normalization must not become so permissive that a
+        genuinely fabricated citation (topically unrelated evidence) stops
+        being caught."""
+        claim = Claim(claim_id="claim_001", text="The physician purchased an automobile.")
+        evidence = Evidence(evidence_id="doc_1", content="The weather today is sunny and warm.")
+        request = JudgeRequest(claim=claim, evidence=[evidence])
+        result = JudgeResult(
+            verdict=ClaimVerdict.SUPPORTED,
+            evidence_ids=["doc_1"],
+        )
+
+        downgraded, changed = apply_citation_support_check(result, request)
+
+        assert changed is True
+        assert downgraded.verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE
+
     def test_non_supported_verdicts_are_not_affected(self) -> None:
         """The overlap check is specific to SUPPORTED, not every verdict."""
         claim = Claim(claim_id="claim_001", text="Company X was founded in 2018.")

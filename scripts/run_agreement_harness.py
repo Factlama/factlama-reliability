@@ -51,6 +51,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.provider_identity import (
+    configuration_fingerprint,
+    pinned_model_version,
+)
+from core.provider_identity import (
+    model_id as provider_model_id,
+)
 from core.qualification import evaluate_agreement_thresholds
 from judges.port import CancellationToken, JudgeProvider, JudgeRequest
 from judges.providers import MockModelProvider, RuleBasedProvider
@@ -215,20 +222,12 @@ def score_provider(
 
     threshold_failures = evaluate_agreement_thresholds(per_label)
 
-    # `.name` is the base model-identity signal a JudgeProvider currently
-    # exposes (CONTRACTS.md's port has no separate pinned_model_id/
-    # configuration_version property). Vendor adapters format it as
-    # "<kind>:<model_name>" (judges/vendor_adapters.py), so the part after
-    # the colon is a real, non-fabricated pinned_model_id; providers with no
-    # colon (Mock, RuleBased) have no underlying pinned model, so it is
-    # honestly None rather than guessed.
-    pinned_model_id = provider.name.split(":", 1)[1] if ":" in provider.name else None
-    # `model_name` alone may be a floating ref (a branch/tag), not an
-    # immutable pin -- append the resolved commit hash when the adapter can
-    # report one (EmbeddingProvider/NLIProvider expose `resolved_revision`
-    # after loading; getattr() so providers without the attribute, or that
-    # can't resolve one, are unaffected rather than erroring).
-    resolved_revision = getattr(provider, "resolved_revision", None)
+    # core.provider_identity: the same shared identity primitives the live
+    # Verifier now uses (F2 of the 2026-09-21 G0-G4 validation report), so a
+    # report's provider/model/config identity and a runtime attempt's are
+    # computed the same way, not two divergent implementations.
+    pinned_model_id = provider_model_id(provider)
+    resolved_revision = pinned_model_version(provider)
     if pinned_model_id is not None and resolved_revision:
         pinned_model_id = f"{pinned_model_id}@{resolved_revision}"
 
@@ -236,7 +235,7 @@ def score_provider(
         "report_version": "0.1",
         "provider_id": provider.name,
         "pinned_model_id": pinned_model_id,
-        "configuration_version": _configuration_fingerprint(provider),
+        "configuration_version": configuration_fingerprint(provider),
         # `core.scoring.derive_calibration_class()` needs a `qualification_status`
         # as one of its inputs -- this report is itself the evidence that
         # feeds `report_agreement()`'s qualification decision, so at the
@@ -265,28 +264,6 @@ def score_provider(
         "usage": {"total_tokens": None, "cost": {"status": "UNAVAILABLE"}},
         "adr_018_threshold_failures": threshold_failures,
     }
-
-
-def _configuration_fingerprint(provider: JudgeProvider) -> str | None:
-    """A real, non-fabricated identity signal for whatever tunable state the
-    provider exposes as public instance attributes -- e.g. two
-    `EmbeddingProvider`s with the same `model_name` but different
-    `support_threshold`/`contradiction_threshold` are different evaluators
-    and must not produce reports with an identical `pinned_model_id` and no
-    other distinguishing field. Derived only from the provider's own public
-    (`vars()`, non-underscore, non-callable) state, not invented: `Mock`/
-    `RuleBasedProvider` carry no such state today and get `None`, not a
-    fabricated version string.
-    """
-    public_state = {
-        key: value
-        for key, value in vars(provider).items()
-        if not key.startswith("_") and not callable(value)
-    }
-    if not public_state:
-        return None
-    encoded = json.dumps(public_state, sort_keys=True, default=str)
-    return hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
 
 def _embedding_provider() -> JudgeProvider:

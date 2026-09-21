@@ -13,6 +13,11 @@ from schemas.instruction import Instruction
 from schemas.policy import Policy
 from schemas.tools import ToolExecution
 
+SUPPORTED_SCHEMA_MAJOR_VERSION = "0"
+"""contracts/v0.1's only known major so far; mirrors Observability's
+operations/versioning.py convention (accept unknown minor, reject unknown
+major) for this repo's own request boundary."""
+
 
 class VerificationMode(str, Enum):
     """Verification mode determining depth and cost."""
@@ -287,11 +292,35 @@ class VerificationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_schema_version(self) -> "VerificationRequest":
-        """Validate schema version compatibility."""
-        supported_versions = ["0.1"]
-        if self.schema_version not in supported_versions:
+        """contracts/v0.1: "Implementations MUST reject unknown major versions,
+        MAY ignore unknown additive fields within a supported major version."
+        An unknown *minor* (e.g. "0.2") must therefore be accepted, not just
+        the exact literal "0.1" this repo currently emits."""
+        major = self.schema_version.split(".")[0]
+        if major != SUPPORTED_SCHEMA_MAJOR_VERSION:
             raise ValueError(
-                f"Unsupported schema version: {self.schema_version}. Supported: {supported_versions}"
+                f"Unsupported schema version: {self.schema_version}. "
+                f"Supported major version: {SUPPORTED_SCHEMA_MAJOR_VERSION}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_policy_reference(self) -> "VerificationRequest":
+        """F4 of the 2026-09-21 G0-G4 validation report: `policy_id` names a
+        registered policy to resolve server-side, but no tenant-scoped
+        policy registry/lookup exists in this repo yet (G5). Silently
+        falling back to the default policy for an unresolvable reference let
+        a request naming e.g. "nonexistent-strict-policy" complete with
+        action PASS under a policy the caller never actually got applied.
+        Until a real lookup exists, every `policy_id` is definitionally
+        unresolvable and must be rejected outright, not silently
+        substituted -- `api/app.py` maps this specific message to a 404
+        NOT_FOUND (CONTRACTS.md: "NOT_FOUND is used for inaccessible
+        tenant-scoped resources"), not a generic 400."""
+        if self.policy_id is not None:
+            raise ValueError(
+                "policy_id cannot be resolved: no tenant-scoped policy registry exists yet; "
+                "supply the policy inline via `policy` instead"
             )
         return self
 
