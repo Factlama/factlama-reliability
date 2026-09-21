@@ -42,12 +42,18 @@ jobs:
         run: ruff format --check .
 
       - name: Type check (mypy)
-        run: mypy schemas core judges api
+        run: mypy schemas core judges api storage
 
       - name: Dependency-boundary check (import-linter)
         run: lint-imports
 
-      - name: Tests (pytest), including the G0 contract fixture suite
-        run: pytest --cov=schemas --cov=core --cov=judges --cov=api --cov-report=term-missing
+      # G5 (ADR-019 SS4): tests/conformance/ needs a real PostgreSQL instance,
+      # not mocks. testcontainers launches/tears down its own throwaway
+      # container via the Docker daemon ubuntu-latest runners already have --
+      # no `services:` block needed. If a runner's socket path ever needs the
+      # same workaround this repo's contributors hit on macOS Docker Desktop,
+      # set TESTCONTAINERS_RYUK_DISABLED=true here.
+      - name: Tests (pytest), including the G0 contract fixture suite and G5 storage conformance
+        run: pytest --cov=schemas --cov=core --cov=judges --cov=api --cov=storage --cov-report=term-missing
         env:
           FACTLAMA_CONTRACTS_DIR: ${{ github.workspace }}/factlama-architecture/contracts/v0.1
