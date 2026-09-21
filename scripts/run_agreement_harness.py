@@ -1,8 +1,14 @@
-"""G4's one-command conformance/agreement runner (`evaluator-agreement-harness.md`).
+"""G4's one-command agreement runner (`evaluator-agreement-harness.md`).
 
 Produces one versioned JSON report for one `(provider_id, pinned_model_id,
-configuration_version, dataset_version)` tuple. By default this scores the
-*public development* fixture set only
+configuration_version, dataset_version)` tuple. This is the *agreement*
+half only, against real `JudgeProvider` adapters -- REL-13's conformance
+fixture suite (well-formed responses under timeout/rate-limit/malformed-
+response) does not exist in this codebase yet (REL-13 is NOT_STARTED), so
+this script cannot run it and its report says so explicitly
+(`conformance_checked: false`) rather than implying it happened.
+
+By default this scores the *public development* fixture set only
 (`tests/fixtures/agreement/dev/*.json`, checked into this repo) -- the
 FactLama-held-out set lives outside this repo's tree entirely (see
 `evaluator-agreement-harness.md` and `factlama-private/README.md` in the
@@ -10,18 +16,29 @@ workspace root) so a provider author cannot memorize an answer key by
 reading this file or its fixtures. A report produced against only the dev
 set is informative for development but is not by itself sufficient for
 `AGREEMENT_REPORTED` (`evaluator-registry.md` requires the held-out set
-too); this script does not claim otherwise.
+too; `core.qualification.report_agreement()` refuses a report with no
+`held_out_hash`/`held_out_fixture_count`); this script does not claim
+otherwise.
 
 Run with:
     python scripts/run_agreement_harness.py --provider rule-based
-    python scripts/run_agreement_harness.py --provider rule-based \\
+    python scripts/run_agreement_harness.py --provider embedding \\
         --held-out-dir ../factlama-private/agreement-held-out
+    python scripts/run_agreement_harness.py --provider nli \\
+        --held-out-dir ../factlama-private/agreement-held-out
+
+`--provider embedding`/`--provider nli` need their vendor extras installed
+(`pip install -e '.[embeddings,nli]'`); `mock`/`rule-based` need nothing
+beyond this repo, and importing this module never pulls in
+sentence-transformers/transformers/torch unless one of the vendor
+providers is actually selected.
 
 Passing this script's own exit code is not a qualification decision --
 `core.qualification.report_agreement()` is what actually records
-`AGREEMENT_REPORTED`, gated by ADR-018's per-label thresholds, and only a
-human/process feeding it a report that includes the held-out set should
-call it expecting a real qualification outcome.
+`AGREEMENT_REPORTED`, gated by ADR-018's per-label thresholds plus
+held-out inclusion and leakage attestation, and only a human/process
+feeding it a report that includes the held-out set and a real attestation
+should call it expecting a real qualification outcome.
 """
 
 from __future__ import annotations
@@ -129,9 +146,11 @@ def score_provider(
     """Run every fixture once and compute per-label precision/recall/F1,
     the adversarial-flip count, a calibration-only breakdown for the
     `ambiguous` family, and latency percentiles. This is the "agreement"
-    half of evaluator-agreement-harness.md -- conformance (well-formed
-    responses under failure modes) is a separate, prior check this script
-    does not repeat (REL-13/G4's conformance suite owns it).
+    half of evaluator-agreement-harness.md only -- conformance (well-formed
+    responses under timeout/rate-limit/malformed-response) is not run here;
+    REL-13, which would own that suite, is NOT_STARTED in this codebase.
+    The returned report's `conformance_checked` is `False` for this reason,
+    not a placeholder.
     """
     counts: dict[str, dict[str, int]] = {label.value: _empty_counts() for label in _SCORED_LABELS}
     adversarial_total = 0
@@ -196,11 +215,31 @@ def score_provider(
 
     threshold_failures = evaluate_agreement_thresholds(per_label)
 
+    # `.name` is the only model-identity signal a JudgeProvider currently
+    # exposes (CONTRACTS.md's port has no separate pinned_model_id/
+    # configuration_version property). Vendor adapters format it as
+    # "<kind>:<model_name>" (judges/vendor_adapters.py), so the part after
+    # the colon is a real, non-fabricated pinned_model_id; providers with no
+    # colon (Mock, RuleBased) have no underlying pinned model, so it is
+    # honestly None rather than guessed. configuration_version and
+    # calibration_class are not tracked by any provider today -- reported as
+    # None rather than invented, per evaluator-agreement-harness.md's report
+    # schema, which lists both fields.
+    pinned_model_id = provider.name.split(":", 1)[1] if ":" in provider.name else None
+
     return {
         "report_version": "0.1",
         "provider_id": provider.name,
+        "pinned_model_id": pinned_model_id,
+        "configuration_version": None,
+        "calibration_class": None,
         "dataset_version": DATASET_VERSION,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        # REL-13's conformance fixture suite (success/ambiguity/timeout/
+        # rate-limit/malformed-response) does not exist in this codebase yet
+        # (REL-13 is NOT_STARTED) -- this script runs the agreement half
+        # only and must not imply conformance was checked.
+        "conformance_checked": False,
         "per_label": per_label,
         "adversarial": {
             "total": adversarial_total,
@@ -208,19 +247,40 @@ def score_provider(
         },
         "ambiguous_calibration": calibration_verdicts,
         "latency_ms": {"p50": _percentile(0.5), "p95": _percentile(0.95)},
+        # No fixture provider reports usage today (REL-07's usage-plumbing
+        # note in factlama-reliability/docs/implementation.md) -- UNAVAILABLE
+        # is honest; it is not silently omitted or defaulted to zero cost.
+        "usage": {"total_tokens": None, "cost": {"status": "UNAVAILABLE"}},
         "adr_018_threshold_failures": threshold_failures,
     }
 
 
-_PROVIDERS = {
+def _embedding_provider() -> JudgeProvider:
+    from judges.vendor_adapters import EmbeddingProvider
+
+    return EmbeddingProvider()
+
+
+def _nli_provider() -> JudgeProvider:
+    from judges.vendor_adapters import NLIProvider
+
+    return NLIProvider()
+
+
+#: Factories, not instances -- embedding/nli are only imported (pulling in
+#: sentence-transformers/transformers/torch) when actually selected, so
+#: `--provider mock` or `--provider rule-based` never requires those extras.
+_PROVIDER_FACTORIES = {
     "mock": MockModelProvider,
     "rule-based": RuleBasedProvider,
+    "embedding": _embedding_provider,
+    "nli": _nli_provider,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider", choices=sorted(_PROVIDERS), default="rule-based")
+    parser.add_argument("--provider", choices=sorted(_PROVIDER_FACTORIES), default="rule-based")
     parser.add_argument("--out", type=argparse.FileType("w"), default=sys.stdout)
     parser.add_argument(
         "--held-out-dir",
@@ -231,7 +291,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    provider = _PROVIDERS[args.provider]()
+    try:
+        provider = _PROVIDER_FACTORIES[args.provider]()
+    except ImportError as exc:
+        print(
+            f"--provider {args.provider} needs its vendor extras installed "
+            f"(pip install -e '.[embeddings,nli]'): {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
     fixtures = dev_fixtures()
     report = score_provider(provider, fixtures)
     report["fixture_sources"] = {"dev": len(fixtures), "held_out": 0}

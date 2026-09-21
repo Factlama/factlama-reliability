@@ -23,14 +23,18 @@ from enum import Enum
 
 from core.compliance import is_provider_compliant
 
-#: ADR-018's per-label qualification bar. A label is only checked once it has
-#: at least ADR_018_MIN_LABEL_N scored examples (dev + held-out combined) --
-#: below that, a precision/recall number is too noisy to gate on, so the
-#: label is skipped rather than failed. SUPPORTED/CONTRADICTED carry a
-#: higher bar because they are the labels a downstream policy action (BLOCK,
-#: PASS) most directly depends on; UNSUPPORTED/INSUFFICIENT_EVIDENCE get a
-#: lower bar because the boundary between "no support" and "insufficient
-#: evidence" is inherently fuzzier for a T0 adapter.
+#: ADR-018's per-label qualification bar. EVERY one of these four labels
+#: must independently reach at least ADR_018_MIN_LABEL_N scored examples --
+#: a label that is missing from a report, or under-sampled, refuses the
+#: whole report (see `_undersampled_labels`) rather than being silently
+#: skipped. An adapter that was never actually exercised against, say,
+#: CONTRADICTED evidence has not been agreement-tested, regardless of how
+#: well it did on SUPPORTED. SUPPORTED/CONTRADICTED carry a higher
+#: precision/recall bar because they are the labels a downstream policy
+#: action (BLOCK, PASS) most directly depends on; UNSUPPORTED/
+#: INSUFFICIENT_EVIDENCE get a lower bar because the boundary between "no
+#: support" and "insufficient evidence" is inherently fuzzier for a T0
+#: adapter.
 ADR_018_MIN_LABEL_N = 5
 ADR_018_THRESHOLDS: dict[str, tuple[float, float]] = {
     "SUPPORTED": (0.80, 0.80),
@@ -40,21 +44,35 @@ ADR_018_THRESHOLDS: dict[str, tuple[float, float]] = {
 }
 
 
+def _undersampled_labels(per_label: Mapping[str, Mapping[str, float | int | None]]) -> list[str]:
+    """Every ADR-018 label that is missing from `per_label`, or below
+    `ADR_018_MIN_LABEL_N` scored examples. Non-empty means the report does
+    not cover all four labels well enough to be evidence at all -- a report
+    that only tested SUPPORTED, however perfectly, has not tested the other
+    three verdicts and must not qualify on that partial evidence. Extra
+    keys in `per_label` outside the four ADR-018 labels (e.g. an `ambiguous`
+    calibration bucket accidentally passed through) are ignored here, not
+    counted toward sufficiency -- only the four scored labels count.
+    """
+    missing: list[str] = []
+    for label in ADR_018_THRESHOLDS:
+        metrics = per_label.get(label)
+        n = (metrics.get("n") or 0) if metrics is not None else 0
+        if n < ADR_018_MIN_LABEL_N:
+            missing.append(f"{label} (n={n})")
+    return missing
+
+
 def evaluate_agreement_thresholds(
     per_label: Mapping[str, Mapping[str, float | int | None]],
 ) -> list[str]:
-    """ADR-018's per-label qualification bar, applied to an agreement
+    """ADR-018's per-label precision/recall bar, applied to an agreement
     report's `per_label` section (`evaluator-agreement-harness.md`'s report
-    schema). Returns human-readable failure reasons; empty means every label
-    with enough scored examples met its precision/recall bar.
-
-    A label missing from `per_label`, or with fewer than
-    `ADR_018_MIN_LABEL_N` scored examples, is skipped -- not failed -- per
-    ADR-018: too few samples to draw a threshold conclusion from is a named
-    data gap, not a quality failure. Skipping every label (an empty or
-    all-thin report) is caught separately by `report_agreement()`, which
-    also requires at least one label to have reached the minimum sample size
-    before a report counts as evidence at all.
+    schema). Returns human-readable failure reasons; empty means every one
+    of the four labels met its bar. Callers must check `_undersampled_labels`
+    first (via `report_agreement()`) -- this function alone does not refuse
+    a report for a label that is entirely missing from `per_label`, since a
+    missing label has no precision/recall to compare against a threshold.
     """
     failures: list[str] = []
     for label, (min_precision, min_recall) in ADR_018_THRESHOLDS.items():
@@ -71,10 +89,6 @@ def evaluate_agreement_thresholds(
         if recall is None or recall < min_recall:
             failures.append(f"{label}: recall {recall} < {min_recall} (n={n})")
     return failures
-
-
-def _has_sufficient_sample_size(per_label: Mapping[str, Mapping[str, float | int | None]]) -> bool:
-    return any((metrics.get("n") or 0) >= ADR_018_MIN_LABEL_N for metrics in per_label.values())
 
 
 class QualificationState(str, Enum):
@@ -132,16 +146,32 @@ def report_agreement(
     dataset_version: str,
     adversarial_flips: int,
     per_label: Mapping[str, Mapping[str, float | int | None]],
+    held_out_hash: str,
+    held_out_fixture_count: int,
+    leakage_attested: bool,
 ) -> QualificationRecord:
     """`CONFORMANCE_PASSED -> AGREEMENT_REPORTED`, only if all of (ADR-013,
-    ADR-018):
+    ADR-018, evaluator-agreement-harness.md):
 
     1. Zero adversarial fixtures flipped to SUPPORTED.
-    2. At least one label reached `ADR_018_MIN_LABEL_N` scored examples --
-       an empty or all-thin `per_label` is insufficient evidence, not a
-       passing report by default.
-    3. Every label that did reach that sample size met its ADR-018
-       precision/recall bar (`evaluate_agreement_thresholds`).
+    2. All four ADR-018 labels reached `ADR_018_MIN_LABEL_N` scored
+       examples -- a report that never exercised, say, CONTRADICTED has not
+       agreement-tested the adapter on it, however well the labels it did
+       cover scored. A missing or under-sampled label refuses the whole
+       report, not just that label (`_undersampled_labels`).
+    3. Every label meets its ADR-018 precision/recall bar
+       (`evaluate_agreement_thresholds`).
+    4. The report actually includes the FactLama-held-out set, not the dev
+       set alone: `held_out_hash` is non-empty and `held_out_fixture_count`
+       is positive. `evaluator-agreement-harness.md`: the dev set's answers
+       are public, so a dev-only report is not independent evidence.
+    5. `leakage_attested` is `True` -- the held-out set's human
+       leakage-control review (`evaluator-agreement-harness.md`: "a dataset
+       reviewer, human, attests to this per release") has actually
+       happened. This is a caller-supplied claim, not something this
+       function can verify; passing `True` without a real attestation
+       having occurred violates the process this parameter exists to
+       enforce, not just this function's contract.
 
     Any failure refuses the transition -- the record stays
     `CONFORMANCE_PASSED`, per evaluator-registry.md, rather than raising: a
@@ -160,13 +190,26 @@ def report_agreement(
         failures.append(
             f"adversarial: {adversarial_flips} fixture(s) flipped to SUPPORTED (ADR-013 requires zero)"
         )
-    if not _has_sufficient_sample_size(per_label):
+
+    undersampled = _undersampled_labels(per_label)
+    if undersampled:
         failures.append(
-            f"insufficient sample size: no label reached ADR_018_MIN_LABEL_N={ADR_018_MIN_LABEL_N} "
-            "scored examples"
+            f"insufficient sample size (ADR_018_MIN_LABEL_N={ADR_018_MIN_LABEL_N}): "
+            f"{', '.join(undersampled)}"
         )
     else:
         failures.extend(evaluate_agreement_thresholds(per_label))
+
+    if not held_out_hash or held_out_fixture_count <= 0:
+        failures.append(
+            "held-out set not included: held_out_hash/held_out_fixture_count are required "
+            "(evaluator-agreement-harness.md: a dev-only report is not sufficient evidence)"
+        )
+    if not leakage_attested:
+        failures.append(
+            "leakage-control attestation missing: a human reviewer must attest to the "
+            "held-out set per evaluator-agreement-harness.md before it counts as evidence"
+        )
 
     if failures:
         return replace(record, threshold_failures=tuple(failures))
