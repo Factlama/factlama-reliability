@@ -62,6 +62,23 @@ class EmbeddingProvider(JudgeProvider):
     def name(self) -> str:
         return f"embedding:{self.model_name}"
 
+    @property
+    def resolved_revision(self) -> str | None:
+        """The specific commit the loaded model resolved to, once
+        `_get_model()` has run -- `model_name` may be a floating ref (a
+        branch/tag), so this is the immutable identity signal a report's
+        `pinned_model_id` needs and `model_name` alone cannot give it.
+        `None` before the model is loaded, or if the loaded
+        sentence-transformers version doesn't expose the underlying HF
+        config's `_commit_hash` -- not guessed."""
+        if self._model is None:
+            return None
+        try:
+            config = self._model[0].auto_model.config
+        except (IndexError, AttributeError, KeyError):
+            return None
+        return getattr(config, "_commit_hash", None)
+
     def _get_model(self) -> Any:
         """Lazy-load the sentence transformer model."""
         if self._model is None:
@@ -322,6 +339,16 @@ class NLIProvider(JudgeProvider):
     @property
     def name(self) -> str:
         return f"nli:{self.model_name}"
+
+    @property
+    def resolved_revision(self) -> str | None:
+        """The specific commit the loaded model resolved to, once
+        `_get_model()` has run -- see `EmbeddingProvider.resolved_revision`
+        for why this matters. `None` before the model is loaded, or if the
+        loaded transformers version doesn't expose `config._commit_hash`."""
+        if self._model is None:
+            return None
+        return getattr(self._model.config, "_commit_hash", None)
 
     def _get_model(self) -> tuple[Any, Any]:
         """Lazy-load the NLI model, tokenizer, and its entailment/neutral/contradiction label mapping."""

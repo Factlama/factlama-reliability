@@ -139,6 +139,29 @@ class TestScoreProvider:
         report = score_provider(_AlwaysSupportedProvider(), fixtures)
         assert report["configuration_version"] is None
 
+    def test_resolved_revision_is_appended_to_pinned_model_id_when_available(self) -> None:
+        """A provider exposing `resolved_revision` (EmbeddingProvider/
+        NLIProvider, once loaded) gets that commit hash appended to
+        `pinned_model_id` -- `model_name` alone may be a floating ref, not
+        an immutable pin."""
+
+        class _PinnedStub:
+            name = "embedding:some/model"
+            resolved_revision = "abc123deadbeef"
+
+            def evaluate(self, request, deadline, cancellation):
+                return JudgeResult(verdict=ClaimVerdict.SUPPORTED, evidence_ids=[])
+
+        fixtures = [f for f in dev_fixtures() if f.family == "direct_support"][:1]
+        report = score_provider(_PinnedStub(), fixtures)
+        assert report["pinned_model_id"] == "some/model@abc123deadbeef"
+
+    def test_missing_resolved_revision_leaves_pinned_model_id_unchanged(self) -> None:
+        """A provider with no `resolved_revision` attribute at all (Mock,
+        RuleBased) or one that returns None/empty is unaffected."""
+        report = score_provider(RuleBasedProvider(), dev_fixtures())
+        assert report["pinned_model_id"] is None
+
     def test_rule_based_providers_with_different_thresholds_are_distinguished(self) -> None:
         """RuleBasedProvider itself carries public `support_threshold`/
         `contradiction_threshold` state -- confirm the fingerprint actually

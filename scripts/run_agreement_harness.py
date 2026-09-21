@@ -215,22 +215,35 @@ def score_provider(
 
     threshold_failures = evaluate_agreement_thresholds(per_label)
 
-    # `.name` is the only model-identity signal a JudgeProvider currently
+    # `.name` is the base model-identity signal a JudgeProvider currently
     # exposes (CONTRACTS.md's port has no separate pinned_model_id/
     # configuration_version property). Vendor adapters format it as
     # "<kind>:<model_name>" (judges/vendor_adapters.py), so the part after
     # the colon is a real, non-fabricated pinned_model_id; providers with no
     # colon (Mock, RuleBased) have no underlying pinned model, so it is
-    # honestly None rather than guessed. calibration_class is not tracked by
-    # any provider today -- reported as None rather than invented, per
-    # evaluator-agreement-harness.md's report schema, which lists it.
+    # honestly None rather than guessed.
     pinned_model_id = provider.name.split(":", 1)[1] if ":" in provider.name else None
+    # `model_name` alone may be a floating ref (a branch/tag), not an
+    # immutable pin -- append the resolved commit hash when the adapter can
+    # report one (EmbeddingProvider/NLIProvider expose `resolved_revision`
+    # after loading; getattr() so providers without the attribute, or that
+    # can't resolve one, are unaffected rather than erroring).
+    resolved_revision = getattr(provider, "resolved_revision", None)
+    if pinned_model_id is not None and resolved_revision:
+        pinned_model_id = f"{pinned_model_id}@{resolved_revision}"
 
     return {
         "report_version": "0.1",
         "provider_id": provider.name,
         "pinned_model_id": pinned_model_id,
         "configuration_version": _configuration_fingerprint(provider),
+        # `core.scoring.derive_calibration_class()` needs a `qualification_status`
+        # as one of its inputs -- this report is itself the evidence that
+        # feeds `report_agreement()`'s qualification decision, so at the
+        # point this report is generated the qualification_status it would
+        # need does not exist yet. Computing it here would mean guessing
+        # that input rather than reporting a real one; None is correct, not
+        # a placeholder for "not implemented yet."
         "calibration_class": None,
         "dataset_version": DATASET_VERSION,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

@@ -45,41 +45,65 @@ ADR_018_THRESHOLDS: dict[str, tuple[float, float]] = {
 }
 
 
+def _coerce_sample_count(value: object) -> int | None:
+    """Coerce a report's `n` to a non-negative integer sample count, or
+    `None` if it cannot be one: missing, non-numeric, `NaN`/infinite,
+    negative, or non-integral (e.g. `5.5` scored examples is not a valid
+    count, and `n=inf`/`n=NaN` must not compare as "large enough" against
+    `ADR_018_MIN_LABEL_N` the way the old `n < ADR_018_MIN_LABEL_N`
+    comparison let them). `bool` is rejected even though it is technically
+    an `int` subclass in Python -- `True`/`False` are not sample counts.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric < 0 or numeric != int(numeric):
+        return None
+    return int(numeric)
+
+
 def _undersampled_labels(per_label: Mapping[str, Mapping[str, float | int | None]]) -> list[str]:
-    """Every ADR-018 label that is missing from `per_label`, or below
-    `ADR_018_MIN_LABEL_N` scored examples. Non-empty means the report does
-    not cover all four labels well enough to be evidence at all -- a report
-    that only tested SUPPORTED, however perfectly, has not tested the other
-    three verdicts and must not qualify on that partial evidence. Extra
-    keys in `per_label` outside the four ADR-018 labels (e.g. an `ambiguous`
-    calibration bucket accidentally passed through) are ignored here, not
-    counted toward sufficiency -- only the four scored labels count.
+    """Every ADR-018 label that is missing from `per_label`, has an invalid
+    `n` (see `_coerce_sample_count`), or is below `ADR_018_MIN_LABEL_N`
+    scored examples. Non-empty means the report does not cover all four
+    labels well enough to be evidence at all -- a report that only tested
+    SUPPORTED, however perfectly, has not tested the other three verdicts
+    and must not qualify on that partial evidence. Extra keys in `per_label`
+    outside the four ADR-018 labels (e.g. an `ambiguous` calibration bucket
+    accidentally passed through) are ignored here, not counted toward
+    sufficiency -- only the four scored labels count.
     """
     missing: list[str] = []
     for label in ADR_018_THRESHOLDS:
         metrics = per_label.get(label)
-        n = (metrics.get("n") or 0) if metrics is not None else 0
-        if n < ADR_018_MIN_LABEL_N:
-            missing.append(f"{label} (n={n})")
+        raw_n = metrics.get("n") if metrics is not None else None
+        n = _coerce_sample_count(raw_n)
+        if n is None or n < ADR_018_MIN_LABEL_N:
+            missing.append(f"{label} (n={raw_n!r})")
     return missing
 
 
-def _invalid_metric(value: float | int | None) -> bool:
-    """True if `value` cannot be a real precision/recall: missing,
-    non-numeric, NaN/infinite, or outside `[0, 1]`. A threshold comparison
-    against NaN is `False` either way in Python (`float("nan") < 0.8` is
-    `False`, and so is `>=`), so a corrupted or fabricated metric would
-    silently pass `precision < min_precision` instead of failing it -- this
-    check exists so a non-finite or out-of-range value refuses the report
-    instead of being compared as if it were a real probability.
+def _coerce_probability(value: object) -> float | None:
+    """Coerce a report's precision/recall value to a finite float in
+    `[0, 1]`, or `None` if it cannot be: missing, non-numeric, `NaN`/
+    infinite, or out of range. Returning the coerced float (not just a
+    validity flag) matters -- comparing the *original*, uncoerced value
+    against a threshold let a numeric string (e.g. `"0.9"`) raise
+    `TypeError` on `"0.9" < 0.8` instead of being either accepted or
+    refused cleanly.
     """
-    if value is None:
-        return True
+    if value is None or isinstance(value, bool):
+        return None
     try:
         numeric = float(value)
     except (TypeError, ValueError):
-        return True
-    return not math.isfinite(numeric) or not (0.0 <= numeric <= 1.0)
+        return None
+    if not math.isfinite(numeric) or not (0.0 <= numeric <= 1.0):
+        return None
+    return numeric
 
 
 def evaluate_agreement_thresholds(
@@ -91,27 +115,31 @@ def evaluate_agreement_thresholds(
     of the four labels met its bar. Callers must check `_undersampled_labels`
     first (via `report_agreement()`) -- this function alone does not refuse
     a report for a label that is entirely missing from `per_label`, since a
-    missing label has no precision/recall to compare against a threshold.
+    missing label has no precision/recall to compare against a threshold,
+    and it skips (rather than fails) a label whose own `n` is invalid or
+    below the minimum, since that is `_undersampled_labels`'s job to report.
     """
     failures: list[str] = []
     for label, (min_precision, min_recall) in ADR_018_THRESHOLDS.items():
         metrics = per_label.get(label)
         if metrics is None:
             continue
-        n = metrics.get("n") or 0
-        if n < ADR_018_MIN_LABEL_N:
+        n = _coerce_sample_count(metrics.get("n"))
+        if n is None or n < ADR_018_MIN_LABEL_N:
             continue
-        precision = metrics.get("precision")
-        recall = metrics.get("recall")
-        if _invalid_metric(precision):
+        raw_precision = metrics.get("precision")
+        raw_recall = metrics.get("recall")
+        precision = _coerce_probability(raw_precision)
+        recall = _coerce_probability(raw_recall)
+        if precision is None:
             failures.append(
-                f"{label}: precision is not a valid probability ({precision!r}) (n={n})"
+                f"{label}: precision is not a valid probability ({raw_precision!r}) (n={n})"
             )
-        elif precision < min_precision:  # type: ignore[operator]
+        elif precision < min_precision:
             failures.append(f"{label}: precision {precision} < {min_precision} (n={n})")
-        if _invalid_metric(recall):
-            failures.append(f"{label}: recall is not a valid probability ({recall!r}) (n={n})")
-        elif recall < min_recall:  # type: ignore[operator]
+        if recall is None:
+            failures.append(f"{label}: recall is not a valid probability ({raw_recall!r}) (n={n})")
+        elif recall < min_recall:
             failures.append(f"{label}: recall {recall} < {min_recall} (n={n})")
     return failures
 

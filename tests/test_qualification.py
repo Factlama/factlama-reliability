@@ -267,6 +267,71 @@ class TestADR018QualificationThreshold:
         assert result.state == QualificationState.CONFORMANCE_PASSED
         assert result.threshold_failures != ()
 
+    def test_nan_sample_count_refuses_the_report(self) -> None:
+        """Regression: `nan < ADR_018_MIN_LABEL_N` is `False`, so the old
+        `n = metrics.get("n") or 0` check treated `n=NaN` as sufficient."""
+        record = mark_conformance_passed(_record())
+        per_label = _passing_per_label()
+        per_label["SUPPORTED"] = {"precision": 1.0, "recall": 1.0, "f1": 1.0, "n": float("nan")}
+        result = report_agreement(record, **_passing_kwargs(per_label=per_label))
+        assert result.state == QualificationState.CONFORMANCE_PASSED
+        assert any("insufficient sample size" in reason for reason in result.threshold_failures)
+
+    def test_infinite_sample_count_refuses_the_report(self) -> None:
+        """Regression: `inf < ADR_018_MIN_LABEL_N` is `False`, so `n=inf`
+        (an impossible sample count) previously read as "sufficient"."""
+        record = mark_conformance_passed(_record())
+        per_label = _passing_per_label()
+        per_label["SUPPORTED"] = {"precision": 1.0, "recall": 1.0, "f1": 1.0, "n": float("inf")}
+        result = report_agreement(record, **_passing_kwargs(per_label=per_label))
+        assert result.state == QualificationState.CONFORMANCE_PASSED
+        assert any("insufficient sample size" in reason for reason in result.threshold_failures)
+
+    def test_non_integer_sample_count_refuses_the_report(self) -> None:
+        """Regression: `n=5.5` is not a valid count of scored examples --
+        it previously cleared `5.5 >= ADR_018_MIN_LABEL_N` unchallenged."""
+        record = mark_conformance_passed(_record())
+        per_label = _passing_per_label()
+        per_label["SUPPORTED"] = {"precision": 1.0, "recall": 1.0, "f1": 1.0, "n": 5.5}
+        result = report_agreement(record, **_passing_kwargs(per_label=per_label))
+        assert result.state == QualificationState.CONFORMANCE_PASSED
+        assert any("insufficient sample size" in reason for reason in result.threshold_failures)
+
+    def test_negative_sample_count_refuses_the_report(self) -> None:
+        record = mark_conformance_passed(_record())
+        per_label = _passing_per_label()
+        per_label["SUPPORTED"] = {"precision": 1.0, "recall": 1.0, "f1": 1.0, "n": -5}
+        result = report_agreement(record, **_passing_kwargs(per_label=per_label))
+        assert result.state == QualificationState.CONFORMANCE_PASSED
+        assert any("insufficient sample size" in reason for reason in result.threshold_failures)
+
+    def test_numeric_string_precision_is_coerced_not_raised(self) -> None:
+        """Regression: comparing the *original* string against a float
+        threshold raised `TypeError` (`"0.9" < 0.8`) instead of either
+        accepting or refusing the report -- a well-formed-looking report
+        must not crash `evaluate_agreement_thresholds()`."""
+        record = mark_conformance_passed(_record())
+        per_label = _passing_per_label()
+        per_label["SUPPORTED"] = {"precision": "0.95", "recall": "0.95", "f1": None, "n": 6}
+        result = report_agreement(record, **_passing_kwargs(per_label=per_label))
+        assert result.state == QualificationState.AGREEMENT_REPORTED
+
+    def test_numeric_string_below_threshold_refuses_cleanly(self) -> None:
+        record = mark_conformance_passed(_record())
+        per_label = _passing_per_label()
+        per_label["SUPPORTED"] = {"precision": "0.1", "recall": "0.1", "f1": None, "n": 6}
+        result = report_agreement(record, **_passing_kwargs(per_label=per_label))
+        assert result.state == QualificationState.CONFORMANCE_PASSED
+        assert any("SUPPORTED: precision" in reason for reason in result.threshold_failures)
+
+    def test_non_numeric_string_precision_refuses_the_report(self) -> None:
+        record = mark_conformance_passed(_record())
+        per_label = _passing_per_label()
+        per_label["SUPPORTED"] = {"precision": "not-a-number", "recall": 0.9, "f1": None, "n": 6}
+        result = report_agreement(record, **_passing_kwargs(per_label=per_label))
+        assert result.state == QualificationState.CONFORMANCE_PASSED
+        assert any("not a valid probability" in reason for reason in result.threshold_failures)
+
     def test_a_fully_passing_report_has_no_threshold_failures(self) -> None:
         record = mark_conformance_passed(_record())
         result = report_agreement(record, **_passing_kwargs())
