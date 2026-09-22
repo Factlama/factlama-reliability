@@ -1,8 +1,24 @@
 """Tests for scoring engine."""
 
-from core.scoring import ScoringEngine, derive_calibration_class, determine_verdict
+from datetime import datetime, timezone
+
+from core.scoring import (
+    ScoringEngine,
+    derive_calibration_class,
+    determine_status,
+    determine_verdict,
+)
 from schemas.claims import ClaimVerdict, ClaimVerification, RationaleCode
-from schemas.verification import OverallVerdict, ScoreStatus
+from schemas.verification import (
+    AbstentionReason,
+    Attempt,
+    AttemptOutcome,
+    DisputeReason,
+    OverallVerdict,
+    QualificationStatus,
+    ResultStatus,
+    ScoreStatus,
+)
 
 
 class TestScoringEngine:
@@ -304,3 +320,115 @@ class TestDetermineVerdict:
             ),
         ]
         assert determine_verdict(claims) == OverallVerdict.PARTIAL
+
+    def test_any_disputed_claim_overrides_everything_else(self) -> None:
+        """G5/ADR-015: DISPUTED outranks even CONTRADICTED -- a disputed
+        claim must never resolve to a silent FAIL (or PASS) majority vote."""
+        claims = [
+            ClaimVerification(
+                claim_id="c1",
+                verdict=ClaimVerdict.SUPPORTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
+            ),
+            ClaimVerification(
+                claim_id="c2",
+                verdict=ClaimVerdict.CONTRADICTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+            ),
+            ClaimVerification(
+                claim_id="c3",
+                verdict=ClaimVerdict.DISPUTED,
+                rationale_code=RationaleCode.JUDGE_DISAGREEMENT,
+            ),
+        ]
+        assert determine_verdict(claims) == OverallVerdict.DISPUTED
+
+
+def _attempt(
+    outcome: AttemptOutcome = AttemptOutcome.COMPLETED, error: str | None = None
+) -> Attempt:
+    now = datetime.now(timezone.utc)
+    return Attempt(
+        attempt_id="attempt_1",
+        provider_id="test",
+        configuration_version="0.1",
+        qualification_status=QualificationStatus.UNQUALIFIED,
+        calibration_class="NONE",
+        outcome=outcome,
+        error=error,
+        started_at=now,
+        completed_at=now,
+    )
+
+
+class TestDetermineStatus:
+    """Tests for `determine_status()` -- shared by `Verifier.verify()` and
+    `worker.reconciliation`."""
+
+    def test_usage_budget_exceeded_abstains_regardless_of_claims(self) -> None:
+        status, verdict, abstention, dispute = determine_status(
+            claims=[object()],
+            claim_verifications=[],
+            attempts=[],
+            usage_budget_exceeded=True,
+        )
+        assert status == ResultStatus.ABSTAINED
+        assert verdict == OverallVerdict.ABSTAIN
+        assert abstention == AbstentionReason.BUDGET_EXHAUSTED
+        assert dispute is None
+
+    def test_no_claims_abstains_no_checkable_claims(self) -> None:
+        status, _verdict, abstention, dispute = determine_status(
+            claims=[], claim_verifications=[], attempts=[]
+        )
+        assert status == ResultStatus.ABSTAINED
+        assert abstention == AbstentionReason.NO_CHECKABLE_CLAIMS
+        assert dispute is None
+
+    def test_all_attempts_failed_abstains_provider_failure(self) -> None:
+        status, _verdict, abstention, dispute = determine_status(
+            claims=[object()],
+            claim_verifications=[],
+            attempts=[_attempt(AttemptOutcome.FAILED, error="UNAVAILABLE")],
+        )
+        assert status == ResultStatus.ABSTAINED
+        assert abstention == AbstentionReason.PROVIDER_FAILURE
+        assert dispute is None
+
+    def test_disputed_claim_yields_disputed_status_and_reason(self) -> None:
+        claims = [
+            ClaimVerification(
+                claim_id="c1",
+                verdict=ClaimVerdict.DISPUTED,
+                rationale_code=RationaleCode.JUDGE_DISAGREEMENT,
+            )
+        ]
+        status, verdict, abstention, dispute = determine_status(
+            claims=[object()],
+            claim_verifications=claims,
+            attempts=[_attempt()],
+        )
+        assert status == ResultStatus.DISPUTED
+        assert verdict == OverallVerdict.DISPUTED
+        assert abstention is None
+        assert dispute == DisputeReason.JUDGE_DISAGREEMENT
+
+    def test_completed_result_has_no_abstention_or_dispute_reason(self) -> None:
+        claims = [
+            ClaimVerification(
+                claim_id="c1",
+                verdict=ClaimVerdict.SUPPORTED,
+                rationale_code=RationaleCode.DIRECT_SUPPORT,
+                evidence_ids=["doc_1"],
+            )
+        ]
+        status, verdict, abstention, dispute = determine_status(
+            claims=[object()],
+            claim_verifications=claims,
+            attempts=[_attempt()],
+        )
+        assert status == ResultStatus.COMPLETED
+        assert verdict == OverallVerdict.PASS
+        assert abstention is None
+        assert dispute is None

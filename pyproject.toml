@@ -75,7 +75,7 @@ all = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["schemas", "core", "judges", "api", "storage"]
+packages = ["schemas", "core", "judges", "api", "storage", "worker"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -112,7 +112,7 @@ select = [
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["schemas", "core", "judges", "api", "storage"]
+known-first-party = ["schemas", "core", "judges", "api", "storage", "worker"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -166,14 +166,14 @@ module = ["asyncpg.*", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.importlinter]
-root_packages = ["schemas", "core", "judges", "api", "storage"]
+root_packages = ["schemas", "core", "judges", "api", "storage", "worker"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "schemas is a pure data layer with no internal dependencies"
 type = "forbidden"
 source_modules = ["schemas"]
-forbidden_modules = ["core", "judges", "api", "storage"]
+forbidden_modules = ["core", "judges", "api", "storage", "worker"]
 
 [[tool.importlinter.contracts]]
 name = "domain code (schemas, core) must not import a vendor model SDK directly (ADR-004)"
@@ -182,10 +182,13 @@ source_modules = ["schemas", "core"]
 forbidden_modules = ["sentence_transformers", "transformers", "torch", "openai", "anthropic"]
 
 [[tool.importlinter.contracts]]
-name = "api is the outermost layer; domain code (schemas, core, judges) must not import it"
+# api and worker are peer top-level orchestration layers (ADR-019 SS3:
+# "API handlers, worker orchestration, and core services consume ports").
+# Neither may be imported by domain code underneath them.
+name = "api and worker are outermost layers; domain code (schemas, core, judges) must not import either"
 type = "forbidden"
 source_modules = ["schemas", "core", "judges"]
-forbidden_modules = ["api"]
+forbidden_modules = ["api", "worker"]
 
 [[tool.importlinter.contracts]]
 # ADR-019 SS2: storage.backend is the Protocol every adapter (Postgres
@@ -201,17 +204,16 @@ forbidden_modules = ["sqlalchemy", "asyncpg", "alembic"]
 [[tool.importlinter.contracts]]
 # ADR-019 SS3: "API handlers, worker orchestration, and core services
 # consume ports; they do not import concrete backend implementations."
-# G5's async API (PR2) and worker (PR3) depend on storage.backend only; a
-# still-to-be-added composition-root module is the sole intended importer of
-# storage.postgres, and is exempted from this contract when it is added.
-name = "domain code and api must depend on storage.backend, not the concrete storage.postgres adapter"
+# G5's async API (PR2) and worker (PR3) depend on storage.backend only;
+# api.bootstrap and worker.bootstrap are the two designated composition-root
+# modules, each exempted below.
+name = "domain code, api and worker must depend on storage.backend, not the concrete storage.postgres adapter"
 type = "forbidden"
-source_modules = ["schemas", "core", "judges", "api"]
+source_modules = ["schemas", "core", "judges", "api", "worker"]
 forbidden_modules = ["storage.postgres"]
-# api.bootstrap is the one designated composition-root module (ADR-019
-# SS3): it constructs the concrete PostgresStorageBackend at process
-# startup so the rest of api/ never has to.
 ignore_imports = [
     "api.bootstrap -> storage.postgres.backend",
     "api.bootstrap -> storage.postgres.engine",
+    "worker.bootstrap -> storage.postgres.backend",
+    "worker.bootstrap -> storage.postgres.engine",
 ]

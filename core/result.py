@@ -7,6 +7,7 @@ from schemas.claims import ClaimVerification
 from schemas.policy import PolicyAction
 from schemas.verification import (
     AbstentionReason,
+    DisputeReason,
     OverallVerdict,
     Provenance,
     ResultStatus,
@@ -47,6 +48,7 @@ class VerificationResultBuilder:
         self.span_id: str | None = None
         self.status: ResultStatus = ResultStatus.COMPLETED
         self.abstention_reason: AbstentionReason | None = None
+        self.dispute_reason: DisputeReason | None = None
         self.verdict: OverallVerdict = OverallVerdict.PASS
         self.scores: dict[str, ScoreValue] = {}
         self.claims: list[ClaimVerification] = []
@@ -65,6 +67,10 @@ class VerificationResultBuilder:
         self, reason: AbstentionReason | None
     ) -> "VerificationResultBuilder":
         self.abstention_reason = reason
+        return self
+
+    def with_dispute_reason(self, reason: DisputeReason | None) -> "VerificationResultBuilder":
+        self.dispute_reason = reason
         return self
 
     def with_verdict(self, verdict: OverallVerdict) -> "VerificationResultBuilder":
@@ -132,6 +138,7 @@ class VerificationResultBuilder:
             span_id=self.span_id,
             status=self.status,
             abstention_reason=self.abstention_reason,
+            dispute_reason=self.dispute_reason,
             verdict=self.verdict,
             scores=self.scores,
             claims=self.claims,

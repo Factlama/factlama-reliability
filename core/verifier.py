@@ -19,7 +19,7 @@ from core.compliance import is_provider_compliant
 from core.evidence import EvidenceMapper, SimpleEvidenceMapper
 from core.policy import PolicyEngine
 from core.result import VerificationResultBuilder
-from core.scoring import ScoringEngine, derive_calibration_class, determine_verdict
+from core.scoring import ScoringEngine, derive_calibration_class, determine_status
 from judges.port import (
     CancellationToken,
     JudgeError,
@@ -153,7 +153,7 @@ class Verifier:
         # downstream of claim dispatch (e.g. in scoring or policy
         # evaluation) must not erase judge work already completed for this
         # request. Declared outside the try block so the except handler
-        # below can still see whatever `_verify_claims()` actually returned,
+        # below can still see whatever `dispatch_claims()` actually returned,
         # instead of discarding it in favor of one synthetic failure.
         claim_verifications: list[ClaimVerification] = []
         attempts: list[Attempt] = []
@@ -172,13 +172,15 @@ class Verifier:
                     request.request_id,
                     budget_violation,
                 )
-                return self._abstained_result(
-                    builder,
+                return self.abstained_result(
+                    tenant_id,
                     started_at,
                     request,
                     reason=AbstentionReason.BUDGET_EXHAUSTED,
                     error_label=JudgeErrorCode.BUDGET_EXHAUSTED.value,
                     claim_count=len(claims),
+                    trace_id=trace_id,
+                    span_id=span_id,
                 )
 
             if not is_provider_compliant(
@@ -192,13 +194,15 @@ class Verifier:
                     sorted(self.model_provider.compliance_tags),
                     policy.required_provider_compliance,
                 )
-                return self._abstained_result(
-                    builder,
+                return self.abstained_result(
+                    tenant_id,
                     started_at,
                     request,
                     reason=AbstentionReason.NO_COMPLIANT_PROVIDER,
                     error_label=JudgeErrorCode.NO_COMPLIANT_PROVIDER.value,
                     claim_count=len(claims),
+                    trace_id=trace_id,
+                    span_id=span_id,
                 )
 
             (
@@ -207,7 +211,7 @@ class Verifier:
                 calibration_class,
                 judge_citation_violations,
                 usage_budget_violation,
-            ) = self._verify_claims(
+            ) = self.dispatch_claims(
                 claims,
                 request.evidence,
             )
@@ -218,109 +222,19 @@ class Verifier:
                     usage_budget_violation,
                 )
 
-            instruction_violations = self._evaluate_instructions(
-                request.answer, request.instructions
-            )
-            scope_violations = self._evaluate_scope(request.answer, policy)
-            citation_support_score, citation_violations = self._evaluate_citations(
-                request.citations, claim_verifications, request.evidence
-            )
-            tool_correctness_score, tool_violations = self._evaluate_tools(request.tool_executions)
-
-            scores = self.scoring_engine.calculate_scores(
-                claim_verifications=claim_verifications,
-                calibration_class=calibration_class,
-                citation_support_score=citation_support_score,
-                tool_correctness_score=tool_correctness_score,
-            )
-
-            violations = (
-                self._generate_violations(claim_verifications)
-                + instruction_violations
-                + scope_violations
-                + citation_violations
-                + judge_citation_violations
-                + tool_violations
-            )
-
-            status, verdict, abstention_reason = self._determine_status(
-                claims,
-                claim_verifications,
-                attempts,
-                usage_budget_exceeded=usage_budget_violation is not None,
-            )
-
-            policy_action, policy_violations = self.policy_engine.evaluate(
-                verdict=verdict,
-                scores=scores,
-                violations=violations,
-                policy=request.policy,
-                has_citations=bool(request.citations),
-            )
-
-            if request.policy:
-                builder.with_policy_version(request.policy.version)
-
-            completed_at = datetime.now(timezone.utc)
-            provenance = Provenance(
-                evaluator_id=EVALUATOR_ID,
-                evaluator_version=EVALUATOR_VERSION,
-                policy_version=request.policy.version if request.policy else None,
-                mode=request.mode,
-                routing_profile_version=f"{request.mode.value.lower()}-0.1",
+            return self.finalize(
+                request=request,
+                tenant_id=tenant_id,
                 started_at=started_at,
-                completed_at=completed_at,
+                trace_id=trace_id,
+                span_id=span_id,
+                claims=claims,
+                claim_verifications=claim_verifications,
                 attempts=attempts,
+                calibration_class=calibration_class,
+                judge_boundary_violations=judge_citation_violations,
+                usage_budget_violation=usage_budget_violation,
             )
-
-            metadata: dict[str, Any] = {
-                "provider": self.model_provider.name,
-                "claim_count": len(claims),
-                "evidence_count": len(request.evidence),
-                "instruction_count": len(request.instructions),
-                "citation_count": len(request.citations),
-                "tool_count": len(request.tool_executions),
-            }
-            if not request.claims:
-                # Extraction mode (not explicit claims): record which
-                # extractor/version produced these claim IDs/offsets
-                # (claim-engine.md: "Record extractor ID/version in
-                # provenance; changing segmentation may change scores").
-                # `getattr` with a fallback, not a hard attribute access:
-                # a caller-supplied extractor need only satisfy `extract()`
-                # (see e.g. tests' duck-typed stubs), not this optional
-                # identity contract.
-                metadata["extractor_id"] = getattr(
-                    self.claim_extractor, "extractor_id", type(self.claim_extractor).__name__
-                )
-                metadata["extractor_version"] = getattr(
-                    self.claim_extractor, "extractor_version", "unknown"
-                )
-
-            cost_completeness = describe_cost_completeness(attempts)
-            if cost_completeness is not None:
-                # summarize_usage()'s cost is a known partial total whenever
-                # an attempt's cost was UNAVAILABLE or measured in a
-                # non-USD currency -- flag that explicitly so a caller
-                # never mistakes "$X known" for "$X total" (see
-                # describe_cost_completeness's own docstring).
-                metadata["usage_cost_completeness"] = cost_completeness
-
-            result = (
-                builder.with_status(status)
-                .with_abstention_reason(abstention_reason)
-                .with_verdict(verdict)
-                .with_scores(scores)
-                .with_claims(claim_verifications)
-                .with_violations(violations + policy_violations)
-                .with_policy_action(policy_action)
-                .with_provenance(provenance)
-                .with_usage_summary(summarize_usage(attempts))
-                .with_metadata(metadata)
-                .build()
-            )
-
-            return result
 
         except Exception:
             logger.exception(
@@ -388,69 +302,181 @@ class Verifier:
                 .build()
             )
 
-    def _determine_status(
+    def finalize(
         self,
+        request: VerificationRequest,
+        tenant_id: str,
+        started_at: datetime,
+        trace_id: str,
+        span_id: str,
         claims: list,
         claim_verifications: list[ClaimVerification],
         attempts: list[Attempt],
-        usage_budget_exceeded: bool = False,
-    ) -> tuple[ResultStatus, OverallVerdict, AbstentionReason | None]:
-        """Determine pipeline status, factual verdict, and abstention reason.
+        calibration_class: str | None,
+        judge_boundary_violations: list[Violation],
+        usage_budget_violation: str | None,
+    ) -> VerificationResult:
+        """Everything after per-claim judge dispatch: deterministic
+        instruction/scope/citation/tool checks, scoring, aggregate
+        status/verdict (including G5's `DISPUTED` precedence), policy
+        evaluation, and result assembly.
 
-        The factual verdict itself always comes from `determine_verdict()`
-        (independent of policy); this only decides whether the pipeline
-        counts as COMPLETED or ABSTAINED and, if abstained, why.
+        Split out of `verify()` (G5) so `worker.runner` can call it a
+        second time with claim_verifications/attempts *merged* across a
+        job's bounded retry attempts, reusing this exact scoring/policy
+        logic instead of approximating it -- the only difference between a
+        single synchronous call and a worker's reconciled result is what
+        `claim_verifications`/`attempts` this method is handed.
+
+        `judge_boundary_violations` is deliberately general, not
+        citation-specific: `verify()` passes `dispatch_claims()`'s own
+        citation-overlap/injection violations; `worker.runner` additionally
+        folds in `worker.reconciliation`'s `JUDGE_DISAGREEMENT` violations
+        for any claim two attempts disputed -- both are judge-boundary
+        signals this method must not compute itself, only include.
         """
-        if usage_budget_exceeded:
-            # ADR-012: exceeding the per-request usage/cost ceiling abstains
-            # BUDGET_EXHAUSTED, the same as the pre-dispatch claim/evidence
-            # caps -- even though, unlike those, one or more real judge
-            # attempts already happened (preserved in provenance).
-            return ResultStatus.ABSTAINED, OverallVerdict.ABSTAIN, AbstentionReason.BUDGET_EXHAUSTED
+        builder = VerificationResultBuilder(
+            request_id=request.request_id,
+            tenant_id=tenant_id,
+            project_id=request.project_id,
+            application_id=request.application_id,
+            interaction_id=request.interaction_id,
+        )
+        builder.with_trace_id(trace_id).with_span_id(span_id)
 
-        if not claims:
-            return (
-                ResultStatus.ABSTAINED,
-                OverallVerdict.ABSTAIN,
-                AbstentionReason.NO_CHECKABLE_CLAIMS,
+        policy = request.policy or Policy(id="default")
+
+        instruction_violations = self._evaluate_instructions(request.answer, request.instructions)
+        scope_violations = self._evaluate_scope(request.answer, policy)
+        citation_support_score, citation_violations = self._evaluate_citations(
+            request.citations, claim_verifications, request.evidence
+        )
+        tool_correctness_score, tool_violations = self._evaluate_tools(request.tool_executions)
+
+        scores = self.scoring_engine.calculate_scores(
+            claim_verifications=claim_verifications,
+            calibration_class=calibration_class,
+            citation_support_score=citation_support_score,
+            tool_correctness_score=tool_correctness_score,
+        )
+
+        violations = (
+            self._generate_violations(claim_verifications)
+            + instruction_violations
+            + scope_violations
+            + citation_violations
+            + judge_boundary_violations
+            + tool_violations
+        )
+
+        status, verdict, abstention_reason, dispute_reason = determine_status(
+            claims,
+            claim_verifications,
+            attempts,
+            usage_budget_exceeded=usage_budget_violation is not None,
+        )
+
+        policy_action, policy_violations = self.policy_engine.evaluate(
+            verdict=verdict,
+            scores=scores,
+            violations=violations,
+            policy=request.policy,
+            has_citations=bool(request.citations),
+        )
+
+        if request.policy:
+            builder.with_policy_version(request.policy.version)
+
+        completed_at = datetime.now(timezone.utc)
+        provenance = Provenance(
+            evaluator_id=EVALUATOR_ID,
+            evaluator_version=EVALUATOR_VERSION,
+            policy_version=request.policy.version if request.policy else None,
+            mode=request.mode,
+            routing_profile_version=f"{request.mode.value.lower()}-0.1",
+            started_at=started_at,
+            completed_at=completed_at,
+            attempts=attempts,
+        )
+
+        metadata: dict[str, Any] = {
+            "provider": self.model_provider.name,
+            "claim_count": len(claims),
+            "evidence_count": len(request.evidence),
+            "instruction_count": len(request.instructions),
+            "citation_count": len(request.citations),
+            "tool_count": len(request.tool_executions),
+        }
+        if not request.claims:
+            # Extraction mode (not explicit claims): record which
+            # extractor/version produced these claim IDs/offsets
+            # (claim-engine.md: "Record extractor ID/version in
+            # provenance; changing segmentation may change scores").
+            # `getattr` with a fallback, not a hard attribute access:
+            # a caller-supplied extractor need only satisfy `extract()`
+            # (see e.g. tests' duck-typed stubs), not this optional
+            # identity contract.
+            metadata["extractor_id"] = getattr(
+                self.claim_extractor, "extractor_id", type(self.claim_extractor).__name__
+            )
+            metadata["extractor_version"] = getattr(
+                self.claim_extractor, "extractor_version", "unknown"
             )
 
-        if attempts and all(a.outcome == AttemptOutcome.FAILED for a in attempts):
-            return ResultStatus.ABSTAINED, OverallVerdict.ABSTAIN, AbstentionReason.PROVIDER_FAILURE
+        cost_completeness = describe_cost_completeness(attempts)
+        if cost_completeness is not None:
+            # summarize_usage()'s cost is a known partial total whenever
+            # an attempt's cost was UNAVAILABLE or measured in a
+            # non-USD currency -- flag that explicitly so a caller
+            # never mistakes "$X known" for "$X total" (see
+            # describe_cost_completeness's own docstring).
+            metadata["usage_cost_completeness"] = cost_completeness
 
-        verdict = determine_verdict(claim_verifications)
-        if verdict == OverallVerdict.ABSTAIN:
-            applicable = [
-                v for v in claim_verifications if v.verdict != ClaimVerdict.NOT_APPLICABLE
-            ]
-            if not applicable:
-                return (
-                    ResultStatus.ABSTAINED,
-                    OverallVerdict.ABSTAIN,
-                    AbstentionReason.NO_CHECKABLE_CLAIMS,
-                )
-            return (
-                ResultStatus.ABSTAINED,
-                OverallVerdict.ABSTAIN,
-                AbstentionReason.INSUFFICIENT_EVIDENCE,
-            )
+        return (
+            builder.with_status(status)
+            .with_abstention_reason(abstention_reason)
+            .with_dispute_reason(dispute_reason)
+            .with_verdict(verdict)
+            .with_scores(scores)
+            .with_claims(claim_verifications)
+            .with_violations(violations + policy_violations)
+            .with_policy_action(policy_action)
+            .with_provenance(provenance)
+            .with_usage_summary(summarize_usage(attempts))
+            .with_metadata(metadata)
+            .build()
+        )
 
-        return ResultStatus.COMPLETED, verdict, None
-
-    def _abstained_result(
+    def abstained_result(
         self,
-        builder: VerificationResultBuilder,
+        tenant_id: str,
         started_at: datetime,
         request: VerificationRequest,
         reason: AbstentionReason,
         error_label: str,
         claim_count: int,
+        trace_id: str | None = None,
+        span_id: str | None = None,
     ) -> VerificationResult:
         """Build a zero-dispatch abstained result for a pre-dispatch gate
         failure (budget or provider compliance) -- no judge call happened
         for any claim, so there is exactly one synthetic failed Attempt
         recording why, not one per claim.
+
+        Public (G5): `verify()` calls this for its own pre-dispatch gates;
+        `worker.runner` calls it identically for the same gates, checked
+        once per job before any bounded-retry attempt (ADR-012's budget
+        caps and ADR-004's compliance check are provider/request
+        properties, not something a retry could change).
         """
+        builder = VerificationResultBuilder(
+            request_id=request.request_id,
+            tenant_id=tenant_id,
+            project_id=request.project_id,
+            application_id=request.application_id,
+            interaction_id=request.interaction_id,
+        )
+        builder.with_trace_id(trace_id).with_span_id(span_id)
         completed_at = datetime.now(timezone.utc)
         attempt = Attempt(
             attempt_id=f"attempt_{uuid.uuid4().hex[:12]}",
@@ -500,12 +526,20 @@ class Verifier:
         """Extract claims from the answer."""
         return self.claim_extractor.extract(answer)
 
-    def _verify_claims(
+    def dispatch_claims(
         self,
         claims: list,
         evidence: list[Evidence],
     ) -> tuple[list[ClaimVerification], list[Attempt], str | None, list[Violation], str | None]:
         """Verify all claims against evidence via one bounded JudgeProvider call each.
+
+        Public (G5): `verify()` calls this once per request; `worker.runner`
+        calls it once per bounded-retry attempt, feeding the accumulated
+        claim_verifications/attempts from every attempt into `finalize()`
+        (via `worker.reconciliation`) once retries are exhausted, instead of
+        each attempt separately calling the full `verify()` pipeline (which
+        would re-run policy/scoring per attempt instead of once on the
+        merged result).
 
         Returns:
             Tuple of (claim verifications, judge attempts, calibration class

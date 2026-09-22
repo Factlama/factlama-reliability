@@ -13,7 +13,16 @@ import hashlib
 from collections.abc import Callable
 
 from schemas.claims import ClaimVerdict, ClaimVerification
-from schemas.verification import OverallVerdict, ScoreStatus, ScoreValue
+from schemas.verification import (
+    AbstentionReason,
+    Attempt,
+    AttemptOutcome,
+    DisputeReason,
+    OverallVerdict,
+    ResultStatus,
+    ScoreStatus,
+    ScoreValue,
+)
 
 NONE_CALIBRATION_CLASS = "NONE"
 
@@ -47,11 +56,22 @@ def determine_verdict(claim_verifications: list[ClaimVerification]) -> OverallVe
     Implements scoring.md's precedence exactly. This is independent of any
     policy action (CONTRACTS.md: "Factual verdict is computed independently
     of policy action").
+
+    G5/ADR-015: a `DISPUTED` claim takes precedence over every other signal
+    (checked before CONTRADICTED/SUPPORTED) -- CONTRACTS.md: "A disputed
+    claim prevents an aggregate PASS/FAIL until an explicit, versioned
+    reconciliation policy exists; MVP does not perform majority voting." A
+    single `Verifier.verify()` call can never itself produce a disputed
+    claim (one judge attempt per claim); this precedence only ever fires
+    once `worker.reconciliation` has merged two or more attempts' judgments
+    for the same claim and found disagreement.
     """
     applicable = [v for v in claim_verifications if v.verdict != ClaimVerdict.NOT_APPLICABLE]
 
     if not applicable:
         return OverallVerdict.ABSTAIN
+    if any(v.verdict == ClaimVerdict.DISPUTED for v in applicable):
+        return OverallVerdict.DISPUTED
     if all(v.verdict == ClaimVerdict.INSUFFICIENT_EVIDENCE for v in applicable):
         return OverallVerdict.ABSTAIN
     if any(v.verdict == ClaimVerdict.CONTRADICTED for v in applicable):
@@ -59,6 +79,75 @@ def determine_verdict(claim_verifications: list[ClaimVerification]) -> OverallVe
     if all(v.verdict == ClaimVerdict.SUPPORTED for v in applicable):
         return OverallVerdict.PASS
     return OverallVerdict.PARTIAL
+
+
+def determine_status(
+    claims: list,
+    claim_verifications: list[ClaimVerification],
+    attempts: list[Attempt],
+    usage_budget_exceeded: bool = False,
+) -> tuple[ResultStatus, OverallVerdict, AbstentionReason | None, DisputeReason | None]:
+    """Determine pipeline status, factual verdict, and abstention/dispute
+    reason for one `VerificationResult`.
+
+    Shared by `Verifier.verify()`'s single-attempt path and
+    `worker.reconciliation`'s cross-attempt merge -- moved here (from a
+    `Verifier` method that never referenced `self`) so both can produce the
+    exact same status/verdict/reason precedence without duplicating it.
+    """
+    if usage_budget_exceeded:
+        # ADR-012: exceeding the per-request usage/cost ceiling abstains
+        # BUDGET_EXHAUSTED, the same as the pre-dispatch claim/evidence
+        # caps -- even though, unlike those, one or more real judge
+        # attempts already happened (preserved in provenance).
+        return (
+            ResultStatus.ABSTAINED,
+            OverallVerdict.ABSTAIN,
+            AbstentionReason.BUDGET_EXHAUSTED,
+            None,
+        )
+
+    if not claims:
+        return (
+            ResultStatus.ABSTAINED,
+            OverallVerdict.ABSTAIN,
+            AbstentionReason.NO_CHECKABLE_CLAIMS,
+            None,
+        )
+
+    if attempts and all(a.outcome == AttemptOutcome.FAILED for a in attempts):
+        return (
+            ResultStatus.ABSTAINED,
+            OverallVerdict.ABSTAIN,
+            AbstentionReason.PROVIDER_FAILURE,
+            None,
+        )
+
+    verdict = determine_verdict(claim_verifications)
+    if verdict == OverallVerdict.DISPUTED:
+        return (
+            ResultStatus.DISPUTED,
+            OverallVerdict.DISPUTED,
+            None,
+            DisputeReason.JUDGE_DISAGREEMENT,
+        )
+    if verdict == OverallVerdict.ABSTAIN:
+        applicable = [v for v in claim_verifications if v.verdict != ClaimVerdict.NOT_APPLICABLE]
+        if not applicable:
+            return (
+                ResultStatus.ABSTAINED,
+                OverallVerdict.ABSTAIN,
+                AbstentionReason.NO_CHECKABLE_CLAIMS,
+                None,
+            )
+        return (
+            ResultStatus.ABSTAINED,
+            OverallVerdict.ABSTAIN,
+            AbstentionReason.INSUFFICIENT_EVIDENCE,
+            None,
+        )
+
+    return ResultStatus.COMPLETED, verdict, None, None
 
 
 class ScoringEngine:
