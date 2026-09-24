@@ -196,9 +196,9 @@ forbidden_modules = ["api", "worker"]
 # vendor transaction objects, SQL, or driver exceptions through its public
 # signatures -- so the protocol layer itself cannot import the vendor
 # libraries it is meant to keep out of everyone else's way either.
-name = "storage.backend/errors/models are a pure protocol layer with no vendor imports"
+name = "storage.backend/errors/models/registry are a pure protocol layer with no vendor imports"
 type = "forbidden"
-source_modules = ["storage.backend", "storage.errors", "storage.models"]
+source_modules = ["storage.backend", "storage.errors", "storage.models", "storage.registry"]
 forbidden_modules = ["sqlalchemy", "asyncpg", "alembic"]
 
 [[tool.importlinter.contracts]]
@@ -216,4 +216,5 @@ ignore_imports = [
     "api.bootstrap -> storage.postgres.engine",
     "worker.bootstrap -> storage.postgres.backend",
     "worker.bootstrap -> storage.postgres.engine",
+    "worker.bootstrap -> storage.postgres.registry",
 ]

@@ -30,12 +30,15 @@ from schemas.verification import Usage
 class JudgeErrorCode(str, Enum):
     """Typed provider/dispatch error taxonomy (CONTRACTS.md).
 
-    BUDGET_EXHAUSTED and NO_COMPLIANT_PROVIDER are pre-dispatch gate outcomes
-    (checked once per request by `core.budgets`/`core.compliance`, not per
-    claim) rather than a live provider's own failure mode; they are part of
-    this enum because CONTRACTS.md's provider/dispatch error vocabulary
-    includes them and `Attempt.error` stores a value from this same set.
-    REVOKED is not produced by this pipeline yet -- it needs G10's registry.
+    BUDGET_EXHAUSTED, NO_COMPLIANT_PROVIDER and REVOKED are pre-dispatch gate
+    outcomes (checked once per request by `core.budgets`/`core.compliance`/
+    `worker.runner`'s registry check, not per claim) rather than a live
+    provider's own failure mode; they are part of this enum because
+    CONTRACTS.md's provider/dispatch error vocabulary includes them and
+    `Attempt.error` stores a value from this same set. REVOKED is produced
+    only by `worker.runner` (G5's baseline `storage.registry.
+    RevocationRegistry` check) -- the synchronous `Verifier.verify()` path
+    has no registry wired in and cannot produce it.
     """
 
     TIMEOUT = "TIMEOUT"

@@ -59,10 +59,11 @@ class ResultStatus(str, Enum):
 class AbstentionReason(str, Enum):
     """Why a result abstained rather than returning a factual verdict.
 
-    BUDGET_EXHAUSTED, NO_COMPLIANT_PROVIDER and REVOKED cannot be produced
-    by this pipeline yet -- there is no budget enforcement (G3) or provider
-    registry (G10) in this pass. They are present so this type can still
-    parse every valid contracts/v0.1 fixture that uses them.
+    REVOKED is produced only by `worker.runner`'s async job path (G5's
+    baseline `storage.registry.RevocationRegistry` check against G4's
+    minimal registry entry) -- the synchronous `Verifier.verify()` path has
+    no registry wired in and cannot produce it. BUDGET_EXHAUSTED and
+    NO_COMPLIANT_PROVIDER are produced by both paths.
     """
 
     NO_CHECKABLE_CLAIMS = "NO_CHECKABLE_CLAIMS"

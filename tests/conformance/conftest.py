@@ -34,6 +34,7 @@ from schemas.verification import (
 from storage.models import OutboxEvent
 from storage.postgres.backend import PostgresStorageBackend
 from storage.postgres.engine import create_storage_engine
+from storage.postgres.registry import PostgresRevocationRegistry
 from storage.postgres.tables import metadata
 
 
@@ -64,6 +65,11 @@ async def engine(postgres_container: PostgresContainer) -> AsyncIterator[AsyncEn
 @pytest_asyncio.fixture
 async def backend(engine: AsyncEngine) -> PostgresStorageBackend:
     return PostgresStorageBackend(engine)
+
+
+@pytest_asyncio.fixture
+async def registry(engine: AsyncEngine) -> PostgresRevocationRegistry:
+    return PostgresRevocationRegistry(engine)
 
 
 def make_tenant(

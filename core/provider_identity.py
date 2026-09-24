@@ -115,3 +115,21 @@ def configuration_fingerprint(provider: JudgeProvider) -> str | None:
         return None
     encoded = json.dumps(public_state, sort_keys=True, default=str)
     return hashlib.sha256(encoded.encode()).hexdigest()[:16]
+
+
+def registry_identity(provider: JudgeProvider) -> tuple[str, str, str]:
+    """`(provider_id, pinned_model_id, configuration_version)` -- the exact
+    tuple `core.qualification.QualificationRecord` keys on, computed the one
+    shared way every other identity-consuming call site in this module
+    already does (`full_pinned_model_id`/`configuration_fingerprint`), so a
+    revocation registered against a report's identity (G4) and a lookup
+    performed against a runtime attempt's identity (G5,
+    `storage.registry.RevocationRegistry`) cannot silently diverge -- the
+    same class of bug F2/R1 of the 2026-09-21 re-audit found and fixed for
+    calibration-class derivation.
+    """
+    provider_id = provider.name
+    base_model_id = model_id(provider)
+    pinned_model_id = full_pinned_model_id(provider) or base_model_id or provider_id
+    configuration_version = configuration_fingerprint(provider) or DEFAULT_CONFIGURATION_VERSION
+    return provider_id, pinned_model_id, configuration_version

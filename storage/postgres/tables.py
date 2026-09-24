@@ -13,6 +13,13 @@ relationships are enforced by the transactions in
 `storage/postgres/backend.py`, not by database-level foreign keys alone --
 `commit_evaluation_and_outbox` must still hold even if a row were ever
 inserted out of band.
+
+`revoked_evaluators` is a separate, single-row-per-identity table backing
+`storage.registry.RevocationRegistry` (G5's baseline revocation check,
+`storage/postgres/registry.py`) -- deliberately not folded into the four
+above, since a revocation lookup is not part of any job's atomic
+commit/idempotency boundary and has its own reader (`worker.runner`, not
+`api/`).
 """
 
 from sqlalchemy import (
@@ -121,4 +128,17 @@ outbox_events = Table(
     Column("lease_expires_at", DateTime(timezone=True), nullable=True),
     Index("ix_outbox_claimable", "acked", "lease_expires_at"),
     UniqueConstraint("event_id", name="uq_outbox_event_id_global"),
+)
+
+revoked_evaluators = Table(
+    "revoked_evaluators",
+    metadata,
+    # Presence of a row is the revocation itself -- there is no `state`
+    # column here (unlike `core.qualification.QualificationRecord`'s full
+    # lifecycle): this table answers exactly one question, "is this
+    # identity revoked," not "what lifecycle state is it in."
+    Column("provider_id", String(256), primary_key=True),
+    Column("pinned_model_id", String(512), primary_key=True),
+    Column("configuration_version", String(128), primary_key=True),
+    Column("revoked_at", DateTime(timezone=True), nullable=False),
 )

@@ -14,6 +14,7 @@ import signal
 from core.verifier import Verifier
 from storage.postgres.backend import PostgresStorageBackend
 from storage.postgres.engine import check_ready, close_engine, create_storage_engine
+from storage.postgres.registry import PostgresRevocationRegistry
 from worker.outbox_delivery import run_outbox_delivery_loop
 from worker.runner import run_poll_loop
 from worker.settings import WorkerSettings
@@ -39,6 +40,7 @@ async def run() -> None:
     # database that was never reachable in the first place.
     await check_ready(engine)
     backend = PostgresStorageBackend(engine)
+    registry = PostgresRevocationRegistry(engine)
     verifier = Verifier()
 
     stop_event = asyncio.Event()
@@ -47,7 +49,7 @@ async def run() -> None:
     logger.info("worker %s starting", settings.worker_id)
     try:
         await asyncio.gather(
-            run_poll_loop(backend, verifier, settings, stop_event),
+            run_poll_loop(backend, verifier, settings, stop_event, registry),
             run_outbox_delivery_loop(backend, settings, stop_event),
         )
     finally:

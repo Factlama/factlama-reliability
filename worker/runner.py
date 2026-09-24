@@ -13,16 +13,24 @@ import contextlib
 import logging
 from datetime import datetime, timedelta, timezone
 
+from core import provider_identity
 from core.budgets import check_request_budget
 from core.compliance import is_provider_compliant
 from core.verifier import Verifier
 from judges.port import JudgeErrorCode
 from schemas.claims import ClaimVerification
 from schemas.policy import Policy
-from schemas.verification import AbstentionReason, Attempt, VerificationResult, Violation
+from schemas.verification import (
+    AbstentionReason,
+    Attempt,
+    VerificationRequest,
+    VerificationResult,
+    Violation,
+)
 from storage.backend import StorageBackend
 from storage.errors import LeaseExpired
 from storage.models import ClaimedJob
+from storage.registry import RevocationRegistry
 from worker.outbox import build_outbox_event
 from worker.reconciliation import merge_claim_verifications
 from worker.retry_policy import compute_backoff_seconds, is_retryable
@@ -40,6 +48,7 @@ async def process_claimed_job(
     backend: StorageBackend,
     verifier: Verifier,
     settings: WorkerSettings,
+    registry: RevocationRegistry,
 ) -> None:
     """Run one claimed job to a terminal outcome and commit it.
 
@@ -83,7 +92,20 @@ async def process_claimed_job(
                 trace_id=trace_id,
                 span_id=span_id,
             )
-            await _commit(backend, claimed.job_id, fencing_token, result)
+            await _commit(
+                backend,
+                registry,
+                verifier,
+                claimed.job_id,
+                fencing_token,
+                result,
+                tenant_id=claimed.tenant.tenant_id,
+                started_at=started_at,
+                request=request,
+                claim_count=len(claims),
+                trace_id=trace_id,
+                span_id=span_id,
+            )
             return
 
         if not is_provider_compliant(
@@ -106,7 +128,59 @@ async def process_claimed_job(
                 trace_id=trace_id,
                 span_id=span_id,
             )
-            await _commit(backend, claimed.job_id, fencing_token, result)
+            await _commit(
+                backend,
+                registry,
+                verifier,
+                claimed.job_id,
+                fencing_token,
+                result,
+                tenant_id=claimed.tenant.tenant_id,
+                started_at=started_at,
+                request=request,
+                claim_count=len(claims),
+                trace_id=trace_id,
+                span_id=span_id,
+            )
+            return
+
+        # EXECUTION_PLAN.md's G5 gate: "a baseline REVOKED abstention reason
+        # belongs here too, checked against G4's minimal registry entry
+        # before dispatch and before result commit -- not the full audited
+        # lifecycle, which is G10's." This is the "before dispatch" half;
+        # `_commit` rechecks immediately before persisting, since bounded
+        # retries below can span real wall-clock time a revocation could
+        # land inside.
+        if await registry.is_revoked(*provider_identity.registry_identity(verifier.model_provider)):
+            logger.warning(
+                "Job %s abstained before dispatch: provider '%s' is revoked",
+                claimed.job_id,
+                verifier.model_provider.name,
+            )
+            result = verifier.abstained_result(
+                claimed.tenant.tenant_id,
+                started_at,
+                request,
+                reason=AbstentionReason.REVOKED,
+                error_label=JudgeErrorCode.REVOKED.value,
+                claim_count=len(claims),
+                trace_id=trace_id,
+                span_id=span_id,
+            )
+            await _commit(
+                backend,
+                registry,
+                verifier,
+                claimed.job_id,
+                fencing_token,
+                result,
+                tenant_id=claimed.tenant.tenant_id,
+                started_at=started_at,
+                request=request,
+                claim_count=len(claims),
+                trace_id=trace_id,
+                span_id=span_id,
+            )
             return
 
         (
@@ -152,7 +226,20 @@ async def process_claimed_job(
             judge_boundary_violations=judge_boundary_violations + disagreement_violations,
             usage_budget_violation=usage_budget_violation,
         )
-        await _commit(backend, claimed.job_id, fencing_token, result)
+        await _commit(
+            backend,
+            registry,
+            verifier,
+            claimed.job_id,
+            fencing_token,
+            result,
+            tenant_id=claimed.tenant.tenant_id,
+            started_at=started_at,
+            request=request,
+            claim_count=len(claims),
+            trace_id=trace_id,
+            span_id=span_id,
+        )
 
     except _CancelledMidDispatch:
         logger.info("Job %s cancelled mid-dispatch", claimed.job_id)
@@ -268,8 +355,46 @@ async def _renew_lease(
 
 
 async def _commit(
-    backend: StorageBackend, job_id: str, fencing_token: int, result: VerificationResult
+    backend: StorageBackend,
+    registry: RevocationRegistry,
+    verifier: Verifier,
+    job_id: str,
+    fencing_token: int,
+    result: VerificationResult,
+    *,
+    tenant_id: str,
+    started_at: datetime,
+    request: VerificationRequest,
+    claim_count: int,
+    trace_id: str,
+    span_id: str,
 ) -> None:
+    """Commit `result`, but only after rechecking revocation immediately
+    before persisting it (`evaluator-registry.md`: "rechecked before result
+    commit"). A provider revoked mid-dispatch -- bounded retries above can
+    span real wall-clock time -- must not have its already-computed
+    factual verdict committed; `result` is overridden with a fresh REVOKED
+    abstention in that case. `process_claimed_job`'s own pre-dispatch check
+    is what avoids the wasted dispatch in the common case; this recheck is
+    what closes the race that check alone cannot.
+    """
+    identity = provider_identity.registry_identity(verifier.model_provider)
+    if await registry.is_revoked(*identity):
+        logger.warning(
+            "Job %s: provider %s revoked before commit; overriding with a REVOKED abstention",
+            job_id,
+            identity,
+        )
+        result = verifier.abstained_result(
+            tenant_id,
+            started_at,
+            request,
+            reason=AbstentionReason.REVOKED,
+            error_label=JudgeErrorCode.REVOKED.value,
+            claim_count=claim_count,
+            trace_id=trace_id,
+            span_id=span_id,
+        )
     event = build_outbox_event(result)
     try:
         await backend.commit_evaluation_and_outbox(job_id, fencing_token, result, event)
@@ -294,6 +419,7 @@ async def run_poll_loop(
     verifier: Verifier,
     settings: WorkerSettings,
     stop_event: asyncio.Event,
+    registry: RevocationRegistry,
 ) -> None:
     """The worker's main loop: claim a due job, process it to a terminal
     outcome, repeat; sleep `poll_interval_seconds` whenever nothing is due.
@@ -304,7 +430,7 @@ async def run_poll_loop(
         if claimed is None:
             await _sleep_or_stop(settings.poll_interval_seconds, stop_event)
             continue
-        await process_claimed_job(claimed, backend, verifier, settings)
+        await process_claimed_job(claimed, backend, verifier, settings, registry)
 
 
 async def _sleep_or_stop(seconds: float, stop_event: asyncio.Event) -> None:

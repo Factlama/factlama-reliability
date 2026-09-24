@@ -8,6 +8,7 @@ bounded-retry and cross-attempt `DISPUTED` reconciliation (ADR-015).
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+from core import provider_identity
 from core.verifier import Verifier
 from judges.port import (
     CancellationToken,
@@ -24,8 +25,9 @@ from schemas.tenancy import TenantContext
 from schemas.verification import VerificationRequest
 from storage.models import ClaimedJob, JobState
 from storage.postgres.backend import PostgresStorageBackend
+from storage.postgres.registry import PostgresRevocationRegistry
 from tests.conformance.conftest import default_deadline, make_tenant
-from worker.runner import process_claimed_job, run_poll_loop
+from worker.runner import _commit, process_claimed_job, run_poll_loop
 from worker.settings import WorkerSettings
 
 
@@ -125,6 +127,7 @@ async def _submit_and_claim(
 
 async def test_single_successful_attempt_commits_completed_pass(
     backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
 ) -> None:
     tenant = make_tenant()
     request = _request(
@@ -137,7 +140,7 @@ async def test_single_successful_attempt_commits_completed_pass(
     provider = _ScriptedProvider([{"c1": _supported("e1")}])
     verifier = Verifier(model_provider=provider)
 
-    await process_claimed_job(claimed, backend, verifier, _fast_settings())
+    await process_claimed_job(claimed, backend, verifier, _fast_settings(), registry)
 
     status = await backend.get_job_status(tenant, claimed.job_id)
     assert status is not None
@@ -152,6 +155,7 @@ async def test_single_successful_attempt_commits_completed_pass(
 
 async def test_retryable_failure_then_success_commits_after_one_retry(
     backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
 ) -> None:
     tenant = make_tenant()
     request = _request(
@@ -169,7 +173,7 @@ async def test_retryable_failure_then_success_commits_after_one_retry(
     )
     verifier = Verifier(model_provider=provider)
 
-    await process_claimed_job(claimed, backend, verifier, _fast_settings(max_attempts=2))
+    await process_claimed_job(claimed, backend, verifier, _fast_settings(max_attempts=2), registry)
 
     status = await backend.get_job_status(tenant, claimed.job_id)
     assert status is not None
@@ -188,6 +192,7 @@ async def test_retryable_failure_then_success_commits_after_one_retry(
 
 async def test_disagreement_across_retry_attempts_yields_disputed(
     backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
 ) -> None:
     """The core G5 scenario (ADR-015): claim c1's first dispatch is a
     retryable failure, forcing a full re-dispatch of *both* claims; claim
@@ -216,7 +221,7 @@ async def test_disagreement_across_retry_attempts_yields_disputed(
     )
     verifier = Verifier(model_provider=provider)
 
-    await process_claimed_job(claimed, backend, verifier, _fast_settings(max_attempts=2))
+    await process_claimed_job(claimed, backend, verifier, _fast_settings(max_attempts=2), registry)
 
     status = await backend.get_job_status(tenant, claimed.job_id)
     assert status is not None
@@ -238,6 +243,7 @@ async def test_disagreement_across_retry_attempts_yields_disputed(
 
 async def test_non_retryable_failure_commits_abstained_provider_failure(
     backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
 ) -> None:
     tenant = make_tenant()
     request = _request(
@@ -248,7 +254,7 @@ async def test_non_retryable_failure_commits_abstained_provider_failure(
     provider = _ScriptedProvider([{"c1": _failure(JudgeErrorCode.CONFIGURATION)}])
     verifier = Verifier(model_provider=provider)
 
-    await process_claimed_job(claimed, backend, verifier, _fast_settings(max_attempts=3))
+    await process_claimed_job(claimed, backend, verifier, _fast_settings(max_attempts=3), registry)
 
     status = await backend.get_job_status(tenant, claimed.job_id)
     assert status is not None
@@ -263,7 +269,9 @@ async def test_non_retryable_failure_commits_abstained_provider_failure(
     assert len(result.provenance.attempts) == 1
 
 
-async def test_cancellation_before_dispatch_fails_the_job(backend: PostgresStorageBackend) -> None:
+async def test_cancellation_before_dispatch_fails_the_job(
+    backend: PostgresStorageBackend, registry: PostgresRevocationRegistry
+) -> None:
     tenant = make_tenant()
     request = _request("req-5", claims=[Claim(claim_id="c1", text="Paris is the capital.")])
     claimed = await _submit_and_claim(backend, tenant, request, "key-5")
@@ -272,7 +280,7 @@ async def test_cancellation_before_dispatch_fails_the_job(backend: PostgresStora
     provider = _ScriptedProvider([{"c1": _supported("e1")}])
     verifier = Verifier(model_provider=provider)
 
-    await process_claimed_job(claimed, backend, verifier, _fast_settings())
+    await process_claimed_job(claimed, backend, verifier, _fast_settings(), registry)
 
     status = await backend.get_job_status(tenant, claimed.job_id)
     assert status is not None
@@ -281,6 +289,7 @@ async def test_cancellation_before_dispatch_fails_the_job(backend: PostgresStora
 
 async def test_poll_loop_claims_and_processes_a_queued_job_then_stops(
     backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
 ) -> None:
     tenant = make_tenant()
     request = _request(
@@ -307,7 +316,7 @@ async def test_poll_loop_claims_and_processes_a_queued_job_then_stops(
 
     await asyncio.wait_for(
         asyncio.gather(
-            run_poll_loop(backend, verifier, settings, stop_event),
+            run_poll_loop(backend, verifier, settings, stop_event, registry),
             _stop_once_terminal(),
         ),
         timeout=5.0,
@@ -320,6 +329,7 @@ async def test_poll_loop_claims_and_processes_a_queued_job_then_stops(
 
 async def test_budget_exceeded_before_dispatch_commits_abstained_budget_exhausted(
     backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
 ) -> None:
     """ADR-012's pre-dispatch claim-count cap -- gated before any judge
     call, so a `SUCCEEDED` job with zero attempts is the correct outcome,
@@ -332,7 +342,7 @@ async def test_budget_exceeded_before_dispatch_commits_abstained_budget_exhauste
     provider = _ScriptedProvider([{}])
     verifier = Verifier(model_provider=provider)
 
-    await process_claimed_job(claimed, backend, verifier, _fast_settings())
+    await process_claimed_job(claimed, backend, verifier, _fast_settings(), registry)
 
     status = await backend.get_job_status(tenant, claimed.job_id)
     assert status is not None
@@ -348,6 +358,7 @@ async def test_budget_exceeded_before_dispatch_commits_abstained_budget_exhauste
 
 async def test_noncompliant_provider_commits_abstained_no_compliant_provider(
     backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
 ) -> None:
     """The scripted test provider declares no compliance tags
     (`JudgeProvider.compliance_tags` defaults to empty); a policy requiring
@@ -362,7 +373,7 @@ async def test_noncompliant_provider_commits_abstained_no_compliant_provider(
     provider = _ScriptedProvider([{}])
     verifier = Verifier(model_provider=provider)
 
-    await process_claimed_job(claimed, backend, verifier, _fast_settings())
+    await process_claimed_job(claimed, backend, verifier, _fast_settings(), registry)
 
     status = await backend.get_job_status(tenant, claimed.job_id)
     assert status is not None
@@ -377,6 +388,7 @@ async def test_noncompliant_provider_commits_abstained_no_compliant_provider(
 
 async def test_deadline_already_past_before_any_dispatch_fails_terminal(
     backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
 ) -> None:
     """A job claimed after its own overall deadline has already elapsed
     (e.g. a slow queue) must not be misreported as `NO_CHECKABLE_CLAIMS` --
@@ -389,8 +401,129 @@ async def test_deadline_already_past_before_any_dispatch_fails_terminal(
     provider = _ScriptedProvider([{"c1": _supported("e1")}])
     verifier = Verifier(model_provider=provider)
 
-    await process_claimed_job(claimed, backend, verifier, _fast_settings())
+    await process_claimed_job(claimed, backend, verifier, _fast_settings(), registry)
 
     status = await backend.get_job_status(tenant, claimed.job_id)
     assert status is not None
     assert status.state == JobState.FAILED
+
+
+async def test_revoked_provider_abstains_before_dispatch_without_calling_the_judge(
+    backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
+) -> None:
+    """EXECUTION_PLAN.md's G5 gate: a baseline REVOKED abstention checked
+    against G4's minimal registry entry before dispatch. No judge call
+    happens at all -- a revoked provider must not be exercised, not merely
+    have its result discarded."""
+    tenant = make_tenant()
+    request = _request("req-10", claims=[Claim(claim_id="c1", text="Paris is the capital.")])
+    claimed = await _submit_and_claim(backend, tenant, request, "key-10")
+
+    provider = _ScriptedProvider([{"c1": _supported("e1")}])
+    verifier = Verifier(model_provider=provider)
+    await registry.revoke(*provider_identity.registry_identity(provider))
+
+    await process_claimed_job(claimed, backend, verifier, _fast_settings(), registry)
+
+    status = await backend.get_job_status(tenant, claimed.job_id)
+    assert status is not None
+    assert status.state == JobState.SUCCEEDED
+    assert status.evaluation_id is not None
+    result = await backend.get_result(tenant, status.evaluation_id)
+    assert result is not None
+    assert result.status.value == "ABSTAINED"
+    assert result.abstention_reason is not None
+    assert result.abstention_reason.value == "REVOKED"
+    assert len(result.provenance.attempts) == 1  # one synthetic gate-failure marker, no judge calls
+    assert provider._counts == {}  # the scripted provider's evaluate() was never called
+
+
+async def test_revocation_between_dispatch_and_commit_overrides_the_committed_result(
+    backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
+) -> None:
+    """evaluator-registry.md: REVOKED "is rechecked before result commit" --
+    a provider revoked *after* the pre-dispatch check already passed (e.g.
+    mid-flight during a bounded-retry sequence spanning real wall-clock
+    time) must not have its already-computed factual verdict persisted.
+
+    Exercises `_commit` directly rather than the whole `process_claimed_job`
+    flow: revoking before the job is even claimed would also trip the
+    pre-dispatch gate, which would not isolate this recheck's own behavior.
+    A real completed PASS `VerificationResult` is built via
+    `verifier.finalize()` first -- exactly as `process_claimed_job` would --
+    then handed to `_commit` *after* the provider is revoked, proving the
+    override happens at commit time, not only at the earlier gate.
+    """
+    tenant = make_tenant()
+    request = _request(
+        "req-11",
+        claims=[Claim(claim_id="c1", text="Paris is the capital of France.")],
+        evidence=[Evidence(evidence_id="e1", content="Paris is the capital of France.")],
+    )
+    claimed = await _submit_and_claim(backend, tenant, request, "key-11")
+
+    provider = _ScriptedProvider([{"c1": _supported("e1")}])
+    verifier = Verifier(model_provider=provider)
+    assert not await registry.is_revoked(*provider_identity.registry_identity(provider))
+
+    claim_verifications, attempts, calibration_class, violations, usage_violation = (
+        verifier.dispatch_claims(claimed.request.claims, claimed.request.evidence)
+    )
+    started_at = datetime.now(timezone.utc)
+    completed_result = verifier.finalize(
+        request=claimed.request,
+        tenant_id=tenant.tenant_id,
+        started_at=started_at,
+        trace_id="trace-11",
+        span_id="span-11",
+        claims=claimed.request.claims,
+        claim_verifications=claim_verifications,
+        attempts=attempts,
+        calibration_class=calibration_class,
+        judge_boundary_violations=violations,
+        usage_budget_violation=usage_violation,
+    )
+    # Sanity check: a real factual verdict exists before the override below.
+    assert completed_result.status.value == "COMPLETED"
+
+    await registry.revoke(*provider_identity.registry_identity(provider))
+    await _commit(
+        backend,
+        registry,
+        verifier,
+        claimed.job_id,
+        claimed.fencing_token,
+        completed_result,
+        tenant_id=tenant.tenant_id,
+        started_at=started_at,
+        request=claimed.request,
+        claim_count=len(claimed.request.claims),
+        trace_id="trace-11",
+        span_id="span-11",
+    )
+
+    status = await backend.get_job_status(tenant, claimed.job_id)
+    assert status is not None
+    assert status.state == JobState.SUCCEEDED
+    assert status.evaluation_id is not None
+    result = await backend.get_result(tenant, status.evaluation_id)
+    assert result is not None
+    assert result.status.value == "ABSTAINED"
+    assert result.abstention_reason is not None
+    assert result.abstention_reason.value == "REVOKED"
+
+
+async def test_revoke_is_idempotent(registry: PostgresRevocationRegistry) -> None:
+    identity = ("provider-x", "model-x@rev1", "0.1")
+    await registry.revoke(*identity)
+    await registry.revoke(*identity)  # must not raise a unique-violation
+    assert await registry.is_revoked(*identity)
+
+
+async def test_unregistered_identity_is_not_revoked(registry: PostgresRevocationRegistry) -> None:
+    """Absence from the registry must never be conflated with revocation --
+    G4's own scope leaves every current T0 adapter unregistered by
+    default."""
+    assert not await registry.is_revoked("some-provider", "some-model@rev1", "0.1")
