@@ -23,7 +23,7 @@ from schemas.errors import (
 )
 from schemas.evidence import Evidence, EvidenceType, Source
 from schemas.instruction import Instruction, InstructionType, Priority
-from schemas.policy import Policy, PolicyAction
+from schemas.policy import CaptureMode, CapturePolicy, Policy, PolicyAction
 from schemas.telemetry import TelemetryData
 from schemas.tenancy import TenantContext
 from schemas.tools import ToolExecution, ToolStatus
@@ -51,6 +51,8 @@ __all__ = [
     "AbstentionReason",
     "Attempt",
     "AttemptOutcome",
+    "CaptureMode",
+    "CapturePolicy",
     # Citation
     "Citation",
     # Claims

@@ -100,7 +100,8 @@ evaluations = Table(
     # Denormalized from the owning job so `get_result`'s tenant/project/
     # application authorization check does not depend on the `jobs` row
     # still existing -- job orchestration state and evaluation results may
-    # end up on different retention schedules (PR4).
+    # end up on different retention schedules (storage.retention.
+    # RetentionPolicy, unwired -- no caller purges either table yet).
     Column("project_id", String(128), nullable=False),
     Column("application_id", String(128), nullable=False),
     Column("result_json", JSONB, nullable=False),

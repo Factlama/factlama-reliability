@@ -19,6 +19,40 @@ class PolicyAction(str, Enum):
     HUMAN_REVIEW = "HUMAN_REVIEW"
 
 
+class CaptureMode(str, Enum):
+    """ADR-008's persistence-time content-governance control (G5/REL-11's
+    baseline scope, `core.governance.apply_capture_mode`): whether a
+    persisted `VerificationResult`'s claim text, rationale and violation
+    messages are written raw, redacted, or not written at all.
+
+    `NONE` and `METADATA_ONLY` are treated identically by this pass -- both
+    "never write raw content" (ADR-008); the distinction between a fully
+    disabled telemetry tier and a metadata-only one is G8/G10's
+    InteractionStore, not this pass's. `REDACTED` writes only after
+    `core.governance`'s own redaction step. `FULL` persists raw content --
+    choosing it here *is* ADR-008's required "explicit tenant opt-in," since
+    no separate authorization mechanism exists yet.
+    """
+
+    NONE = "NONE"
+    METADATA_ONLY = "METADATA_ONLY"
+    REDACTED = "REDACTED"
+    FULL = "FULL"
+
+
+class CapturePolicy(BaseModel):
+    """Content-governance configuration for one policy (ADR-008: "tenant-
+    scoped... capture controls"). `METADATA_ONLY` is the default -- ADR-014:
+    "FactLama's own recommended metadata-only default."
+    """
+
+    mode: CaptureMode = Field(
+        default=CaptureMode.METADATA_ONLY,
+        description="Persistence-time capture control (ADR-008); does not affect the immediate "
+        "response, only what a worker persists (CONTRACTS.md).",
+    )
+
+
 class GroundingPolicy(BaseModel):
     """Policy for groundedness requirements."""
 
@@ -105,6 +139,7 @@ class Policy(BaseModel):
             "request abstains with NO_COMPLIANT_PROVIDER instead."
         ),
     )
+    capture: CapturePolicy = Field(default_factory=CapturePolicy)
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional policy metadata")
 
     def to_dict(self) -> dict[str, Any]:

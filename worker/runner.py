@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from core import provider_identity
 from core.budgets import check_request_budget
 from core.compliance import is_provider_compliant
+from core.governance import apply_capture_mode
 from core.verifier import Verifier
 from judges.port import JudgeErrorCode
 from schemas.claims import ClaimVerification
@@ -369,14 +370,21 @@ async def _commit(
     trace_id: str,
     span_id: str,
 ) -> None:
-    """Commit `result`, but only after rechecking revocation immediately
-    before persisting it (`evaluator-registry.md`: "rechecked before result
-    commit"). A provider revoked mid-dispatch -- bounded retries above can
-    span real wall-clock time -- must not have its already-computed
-    factual verdict committed; `result` is overridden with a fresh REVOKED
-    abstention in that case. `process_claimed_job`'s own pre-dispatch check
-    is what avoids the wasted dispatch in the common case; this recheck is
-    what closes the race that check alone cannot.
+    """Commit `result`, but only after two persistence-time gates.
+
+    First, rechecking revocation immediately before persisting
+    (`evaluator-registry.md`: "rechecked before result commit"). A provider
+    revoked mid-dispatch -- bounded retries above can span real wall-clock
+    time -- must not have its already-computed factual verdict committed;
+    `result` is overridden with a fresh REVOKED abstention in that case.
+    `process_claimed_job`'s own pre-dispatch check is what avoids the
+    wasted dispatch in the common case; this recheck is what closes the
+    race that check alone cannot.
+
+    Second, applying `request.policy`'s `CaptureMode` (`core.governance`,
+    ADR-008) to whatever result is about to be written -- never to the
+    caller's own in-memory copy (CONTRACTS.md: "The immediate response may
+    contain claim text even when persistence is metadata-only").
     """
     identity = provider_identity.registry_identity(verifier.model_provider)
     if await registry.is_revoked(*identity):
@@ -395,6 +403,8 @@ async def _commit(
             trace_id=trace_id,
             span_id=span_id,
         )
+    capture_mode = (request.policy or Policy(id="default")).capture.mode
+    result = apply_capture_mode(result, capture_mode)
     event = build_outbox_event(result)
     try:
         await backend.commit_evaluation_and_outbox(job_id, fencing_token, result, event)

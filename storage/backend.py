@@ -141,8 +141,11 @@ class StorageBackend(Protocol):
     ) -> VerificationResult | None:
         """Tenant-scoped result for `GET /v0.1/verifications/{evaluation_id}`.
         Returns `None` for a missing or cross-tenant evaluation id. Content
-        governance (capture-mode-driven redaction, PR4) is applied before
-        the result reaches this return value, not by the caller."""
+        governance (`core.governance.apply_capture_mode`, ADR-008) already
+        ran before this row was written -- `worker.runner._commit` governs
+        the result at commit time, so whatever this method reads back is
+        already the governed copy; there is nothing left for this method or
+        its caller to filter."""
         ...
 
     async def claim_outbox_batch(
