@@ -52,6 +52,7 @@ from schemas.verification import (
     Provenance,
     QualificationStatus,
     ResultStatus,
+    ScoreStatus,
     Severity,
     Usage,
     VerificationRequest,
@@ -522,6 +523,74 @@ class Verifier:
             .build()
         )
 
+    def override_with_post_dispatch_abstention(
+        self,
+        result: VerificationResult,
+        reason: AbstentionReason,
+        request: VerificationRequest,
+    ) -> VerificationResult:
+        """Override an already-computed `result`'s factual status/verdict
+        with an abstention discovered only *after* real dispatch happened
+        (e.g. commit-time revocation, `worker.runner._commit`'s recheck) --
+        unlike `abstained_result()` above, which builds a synthetic
+        zero-attempt result for a *pre-dispatch* gate where no real work
+        exists yet to preserve.
+
+        Real dispatch already happened and its usage/cost is real
+        regardless of this later-discovered operational reason
+        (CONTRACTS.md: append-only attempts, honest usage accounting; this
+        mirrors R4 of the 2026-09-21 re-audit's "the work already happened"
+        principle for a late provider result, applied here to commit-time
+        revocation instead). `result.provenance.attempts` and
+        `result.usage_summary` are preserved unchanged.
+
+        R2 of the 2026-10-13 G5-fix follow-up review: the first pass left
+        `policy_action` and every `MEASURED` score untouched -- a revoked
+        result could still read `policy_action=PASS` with a measured
+        groundedness of `1.0`, instructing a caller to trust exactly the
+        verdict this override exists to withdraw. Every `MEASURED` score
+        is invalidated to `UNAVAILABLE` (the provider that produced it is
+        no longer trusted, so neither is the measurement -- not
+        `NOT_APPLICABLE`, which would misreport "no claims existed to
+        check"), and `policy_action` is recomputed the same way `finalize()`
+        computes it normally -- `self.policy_engine.evaluate()` against the
+        now-ABSTAIN verdict and invalidated scores, honoring the request's
+        own configured policy rather than hardcoding a single action.
+        """
+        invalidated_scores = {
+            name: (
+                score.model_copy(
+                    update={
+                        "value": None,
+                        "status": ScoreStatus.UNAVAILABLE,
+                        "method_version": None,
+                        "calibration_class": None,
+                    }
+                )
+                if score.status == ScoreStatus.MEASURED
+                else score
+            )
+            for name, score in result.scores.items()
+        }
+        policy_action, policy_violations = self.policy_engine.evaluate(
+            verdict=OverallVerdict.ABSTAIN,
+            scores=invalidated_scores,
+            violations=result.violations,
+            policy=request.policy,
+            has_citations=bool(request.citations),
+        )
+        return result.model_copy(
+            update={
+                "status": ResultStatus.ABSTAINED,
+                "verdict": OverallVerdict.ABSTAIN,
+                "abstention_reason": reason,
+                "dispute_reason": None,
+                "scores": invalidated_scores,
+                "policy_action": policy_action,
+                "violations": result.violations + policy_violations,
+            }
+        )
+
     def _extract_claims(self, answer: str) -> list:
         """Extract claims from the answer."""
         return self.claim_extractor.extract(answer)
@@ -530,6 +599,8 @@ class Verifier:
         self,
         claims: list,
         evidence: list[Evidence],
+        *,
+        overall_deadline: float | None = None,
     ) -> tuple[list[ClaimVerification], list[Attempt], str | None, list[Violation], str | None]:
         """Verify all claims against evidence via one bounded JudgeProvider call each.
 
@@ -541,6 +612,18 @@ class Verifier:
         would re-run policy/scoring per attempt instead of once on the
         merged result).
 
+        `overall_deadline` (a `time.monotonic()`-based absolute deadline,
+        same units as the internal one below) lets a caller with its own
+        real budget -- `worker.runner`'s `claimed.deadline`, the job's
+        fixed total retry/fallback budget -- bound this call tighter than
+        the default `DEFAULT_REQUEST_TIMEOUT_SECONDS`. Without this, each
+        bounded-retry attempt got a *fresh* 60-second budget regardless of
+        how little of the job's real deadline actually remained, so a
+        dispatch starting with (say) 50ms left on the job's own deadline
+        could still run for up to 60 more seconds and have its late success
+        trusted as COMPLETED/PASS -- `None` (the default) preserves the
+        prior synchronous-API-only behavior exactly.
+
         Returns:
             Tuple of (claim verifications, judge attempts, calibration class
             shared by every attempt -- or None when there were no claims to
@@ -548,13 +631,14 @@ class Verifier:
             citation checks below, and a budget violation reason if the
             request's cumulative usage/cost exceeded its per-request ceiling,
             or its overall wall-clock deadline (`DEFAULT_REQUEST_TIMEOUT_
-            SECONDS`) elapsed, partway through -- either because a completed
-            attempt's real usage pushed it over (`check_usage_budget`, after
-            dispatch), dispatching one more call could not be reserved
-            against what remains (`check_usage_reservation`, before
-            dispatch), or the request's total time budget was already spent
-            before the next claim could be dispatched -- in which case any
-            remaining claims were never dispatched).
+            SECONDS`, or `overall_deadline` if tighter) elapsed, partway
+            through -- either because a completed attempt's real usage
+            pushed it over (`check_usage_budget`, after dispatch),
+            dispatching one more call could not be reserved against what
+            remains (`check_usage_reservation`, before dispatch), or the
+            request's total time budget was already spent before the next
+            claim could be dispatched -- in which case any remaining claims
+            were never dispatched).
         """
         verifications: list[ClaimVerification] = []
         attempts: list[Attempt] = []
@@ -583,7 +667,14 @@ class Verifier:
         # each individual claim's own DEFAULT_JUDGE_TIMEOUT_SECONDS -- a
         # request with many claims that each individually finish in time
         # could previously still run unbounded in total.
+        #
+        # F3 of the 2026-10-13 G0-G6 code review: a caller's own real
+        # remaining budget (`overall_deadline`), when tighter, must win --
+        # otherwise this default alone let a near-exhausted job deadline be
+        # silently ignored for up to another full 60 seconds.
         request_deadline = time.monotonic() + DEFAULT_REQUEST_TIMEOUT_SECONDS
+        if overall_deadline is not None:
+            request_deadline = min(request_deadline, overall_deadline)
 
         for claim in claims:
             reservation_violation = check_usage_reservation(summarize_usage(attempts))

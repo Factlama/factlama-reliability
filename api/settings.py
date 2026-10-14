@@ -7,6 +7,7 @@ import os
 from functools import lru_cache
 
 from api.auth import TenantCredentialStore
+from core.execution_storage import ExecutionStorageKeyring
 
 # One answer plus its supplied evidence is not expected to approach this;
 # a request this large is already pathological before any cap on claim or
@@ -18,6 +19,12 @@ DEFAULT_MAX_BODY_BYTES = 1_000_000
 # short enough that a stuck job does not sit QUEUED-eligible-for-retry
 # indefinitely once G5's worker (PR3) exists to enforce it.
 DEFAULT_JOB_DEADLINE_SECONDS = 300
+
+# ADR-020: DURABLE_ENCRYPTED's absolute execution-input expiry, set once at
+# submission -- generous enough for a realistic queue backlog plus bounded
+# retries, short enough that an abandoned job's input does not outlive its
+# own usefulness by much. No retry or lease renewal may extend this once set.
+DEFAULT_EXECUTION_INPUT_TTL_SECONDS = 3600
 
 
 class Settings:
@@ -35,6 +42,19 @@ class Settings:
         self.database_url = os.environ.get("FACTLAMA_DATABASE_URL")
         self.job_deadline_seconds = int(
             os.environ.get("FACTLAMA_JOB_DEADLINE_SECONDS", DEFAULT_JOB_DEADLINE_SECONDS)
+        )
+        self.execution_input_ttl_seconds = int(
+            os.environ.get(
+                "FACTLAMA_EXECUTION_INPUT_TTL_SECONDS", DEFAULT_EXECUTION_INPUT_TTL_SECONDS
+            )
+        )
+        # ADR-020: only consumed by `api/bootstrap.py` when constructing the
+        # real `PostgresStorageBackend` -- an empty/missing keyring is valid
+        # here (fails loudly only if a DURABLE_ENCRYPTED submission actually
+        # needs it, per ExecutionStorageKeyring's own fail-closed design).
+        self.execution_storage_keyring = ExecutionStorageKeyring.from_env(
+            os.environ.get("FACTLAMA_EXECUTION_STORAGE_KEYS"),
+            os.environ.get("FACTLAMA_EXECUTION_STORAGE_ACTIVE_KEY_ID"),
         )
 
 

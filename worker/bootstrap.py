@@ -4,6 +4,13 @@
 one `Verifier` per process, validates the database is reachable before
 polling for work, and stops both the job and outbox-delivery loops on
 SIGTERM/SIGINT.
+
+A6 of the 2026-10-14 ADR-020 review: this process does NOT run the
+execution-input expiry-cleanup sweep -- that is
+`worker/expiry_cleanup_bootstrap.py`'s own, separately deployed process,
+precisely so stopping every instance of *this* process does not also stop
+cleanup. A deployment running only this module has no execution-input
+retention guarantee; see that module's docstring.
 """
 
 import asyncio
@@ -39,7 +46,9 @@ async def run() -> None:
     # ADR-019 SS3: fail startup explicitly rather than polling against a
     # database that was never reachable in the first place.
     await check_ready(engine)
-    backend = PostgresStorageBackend(engine)
+    backend = PostgresStorageBackend(
+        engine, execution_storage_keyring=settings.execution_storage_keyring
+    )
     registry = PostgresRevocationRegistry(engine)
     verifier = Verifier()
 

@@ -53,6 +53,69 @@ class CapturePolicy(BaseModel):
     )
 
 
+class ExecutionStorageMode(str, Enum):
+    """ADR-020: whether FactLama may persist recoverable execution inputs at
+    all, independent of `CaptureMode` (which governs what a *result*
+    retains, not whether a job's own *input* may be durably stored).
+
+    `NO_PERSISTENCE` (the default) means no recoverable input content,
+    plaintext or ciphertext, is written to FactLama-managed persistent
+    storage -- durable async submission is rejected outright, since there is
+    no way to honor this guarantee for an input FactLama would otherwise
+    need to persist to dispatch it later. `DURABLE_ENCRYPTED` requires
+    explicit *tenant* authorization, resolved from trusted authenticated
+    context (`schemas.tenancy.TenantContext.execution_storage_grant`), not
+    merely selected here -- unlike `CaptureMode.FULL`, a request choosing
+    this value alone does not authorize it (A3 of the 2026-10-14 ADR-020
+    review: an earlier pass treated the request's own selection as
+    sufficient, letting any authenticated caller grant itself durable
+    storage by changing its own request body). See
+    `resolve_effective_execution_storage_mode` below -- the request can
+    only ever narrow what the tenant was actually granted, never widen it.
+    Combining `capture.mode=METADATA_ONLY` with
+    `execution_storage.mode=DURABLE_ENCRYPTED` is a real, disclosed state --
+    metadata-only *results* with temporarily protected *inputs* -- never
+    advertised as zero content retention.
+    """
+
+    NO_PERSISTENCE = "NO_PERSISTENCE"
+    DURABLE_ENCRYPTED = "DURABLE_ENCRYPTED"
+
+
+def resolve_effective_execution_storage_mode(
+    *, requested: "ExecutionStorageMode", tenant_grant: "ExecutionStorageMode"
+) -> "ExecutionStorageMode":
+    """ADR-020 section 1: "A client request can narrow permissions but
+    cannot grant itself storage rights." The effective mode is
+    `DURABLE_ENCRYPTED` only when the request asks for it *and* the
+    tenant's own trusted grant (never the request) authorizes it; every
+    other combination -- including a granted tenant whose request itself
+    only asks for `NO_PERSISTENCE` -- resolves to the safe `NO_PERSISTENCE`
+    default. Both enforcement points (`api/app.py`,
+    `storage/postgres/backend.py`) call this with the same two values
+    rather than each re-deriving the intersection independently.
+    """
+    if (
+        requested == ExecutionStorageMode.DURABLE_ENCRYPTED
+        and tenant_grant == ExecutionStorageMode.DURABLE_ENCRYPTED
+    ):
+        return ExecutionStorageMode.DURABLE_ENCRYPTED
+    return ExecutionStorageMode.NO_PERSISTENCE
+
+
+class ExecutionStoragePolicy(BaseModel):
+    """ADR-020's execution-input storage control. `NO_PERSISTENCE` is the
+    default -- the safe baseline that preserves ADR-008's original promise
+    for execution inputs, not just results.
+    """
+
+    mode: ExecutionStorageMode = Field(
+        default=ExecutionStorageMode.NO_PERSISTENCE,
+        description="Whether durable async execution may persist recoverable inputs "
+        "(ADR-020); independent of capture.mode, which governs results/telemetry.",
+    )
+
+
 class GroundingPolicy(BaseModel):
     """Policy for groundedness requirements."""
 
@@ -140,6 +203,7 @@ class Policy(BaseModel):
         ),
     )
     capture: CapturePolicy = Field(default_factory=CapturePolicy)
+    execution_storage: ExecutionStoragePolicy = Field(default_factory=ExecutionStoragePolicy)
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional policy metadata")
 
     def to_dict(self) -> dict[str, Any]:

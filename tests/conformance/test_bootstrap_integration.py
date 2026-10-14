@@ -8,6 +8,8 @@ rest of this package already proves persistence correctness against
 (ADR-019 SS3's startup/readiness contract, exercised end to end rather
 than just type-checked)."""
 
+import base64
+import json
 from collections.abc import Iterator
 
 import pytest
@@ -17,6 +19,7 @@ from testcontainers.community.postgres import PostgresContainer
 
 from api.app import app
 from api.settings import get_settings
+from tests.conformance.conftest import TEST_EXECUTION_STORAGE_KEY, TEST_EXECUTION_STORAGE_KEY_ID
 
 
 @pytest.fixture
@@ -28,7 +31,23 @@ def live_app_client(
     raw = postgres_container.get_connection_url()
     _, _, rest = raw.partition("://")
     monkeypatch.setenv("FACTLAMA_DATABASE_URL", f"postgresql+asyncpg://{rest}")
-    monkeypatch.setenv("FACTLAMA_TENANT_CREDENTIALS", '{"live-key": {"tenant_id": "tenant-live"}}')
+    # A3 of the 2026-10-14 ADR-020 review: the request body below requests
+    # DURABLE_ENCRYPTED -- that alone no longer suffices, this tenant must
+    # be granted it too.
+    monkeypatch.setenv(
+        "FACTLAMA_TENANT_CREDENTIALS",
+        '{"live-key": {"tenant_id": "tenant-live", "execution_storage_grant": "DURABLE_ENCRYPTED"}}',
+    )
+    # ADR-020: the real composition root needs a configured keyring too --
+    # same test key material as the `backend` fixture, so a job encrypted
+    # through this real lifespan is decryptable the same way.
+    monkeypatch.setenv(
+        "FACTLAMA_EXECUTION_STORAGE_KEYS",
+        json.dumps(
+            {TEST_EXECUTION_STORAGE_KEY_ID: base64.b64encode(TEST_EXECUTION_STORAGE_KEY).decode()}
+        ),
+    )
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_ACTIVE_KEY_ID", TEST_EXECUTION_STORAGE_KEY_ID)
     get_settings.cache_clear()
     try:
         with TestClient(app) as client:
@@ -56,6 +75,10 @@ def test_submit_then_read_a_job_through_the_real_composition_root(
         "application_id": "app-a",
         "answer": "Paris is the capital of France.",
         "evidence": [{"evidence_id": "e1", "content": "Paris is the capital of France."}],
+        # ADR-020: durable async submission requires explicit authorization;
+        # this test is about the real composition root/idempotency, not
+        # execution-storage policy itself.
+        "policy": {"id": "test-durable", "execution_storage": {"mode": "DURABLE_ENCRYPTED"}},
     }
     headers = {**_auth(), "Idempotency-Key": "idem-live-1"}
 

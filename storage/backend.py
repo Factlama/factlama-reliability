@@ -21,7 +21,7 @@ are one of `storage.errors`'s typed exceptions.
 """
 
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 from schemas.tenancy import TenantContext
 from schemas.verification import VerificationRequest, VerificationResult
@@ -50,7 +50,9 @@ class StorageBackend(Protocol):
 
         Raises `storage.errors.JobConflict` when the same key is reused
         with a different `canonical_request_hash` (API.md's 409
-        `CONFLICT`)."""
+        `CONFLICT`). Raises `storage.errors.ExecutionStorageNotAuthorized`
+        (ADR-020) when the request's effective `execution_storage.mode` is
+        `NO_PERSISTENCE` -- before any insert, not after a partial write."""
         ...
 
     async def claim_due_job(self, worker_id: str, lease_duration: timedelta) -> ClaimedJob | None:
@@ -58,7 +60,22 @@ class StorageBackend(Protocol):
         `release_for_retry` backoff), or `RUNNING` with an expired lease,
         with a fresh fencing token and lease; increments `attempt_count`.
         Returns `None` when no job is due. Concurrent claimers never both
-        hold the same lease (ADR-019 SS4.3)."""
+        hold the same lease (ADR-019 SS4.3).
+
+        ADR-020: every job reaching this point is `DURABLE_ENCRYPTED` by
+        construction (`NO_PERSISTENCE` never creates one); `ClaimedJob.request`
+        is the real, decrypted request, checked against its absolute expiry
+        before decryption is even attempted; `ClaimedJob.input_expires_at`
+        carries that same absolute expiry forward so a caller can bound
+        dispatch by it too (A5 of the 2026-10-14 ADR-020 review). An
+        already-expired, missing, corrupt, or previously-terminated
+        (tombstoned -- A4 of the same review) input never produces a
+        claim: it is terminalized directly, in the same transaction that
+        would otherwise have claimed it, and this method returns `None`
+        for that call -- never silently returns an empty-input request
+        that could fabricate a passing verdict from nothing, and never
+        raises in a way that would roll the claim back and leave the job
+        claimable (and reselected) again (A1 of the same review)."""
         ...
 
     async def renew_lease(self, job_id: str, fencing_token: int, extension: timedelta) -> datetime:
@@ -74,16 +91,41 @@ class StorageBackend(Protocol):
         fencing_token: int,
         result: VerificationResult,
         event: OutboxEvent,
+        *,
+        governed_request_json: dict[str, Any] | None = None,
     ) -> None:
         """Verify the fencing token still holds, persist the immutable
         evaluation and its stable outbox event, and transition the job to
         `SUCCEEDED` -- all as one atomic operation (ADR-019 SS4.4). A
         cancelled or reclaimed job's stale commit raises
         `storage.errors.LeaseExpired` instead of silently succeeding. A
-        retried commit with byte-identical `result`/`event` for an
-        already-committed `evaluation_id` succeeds without raising
-        (idempotent); one with different content raises
-        `storage.errors.EvaluationConflict`."""
+        byte-identical retry for the *same* already-committed
+        `evaluation_id` succeeds without raising (idempotent); a
+        conflicting retry under the same `evaluation_id` raises
+        `storage.errors.EvaluationConflict` (content differs), and so does
+        a second, independently-computed completion for a job already
+        `SUCCEEDED` under a *different* `evaluation_id` (duplicate delivery
+        of the same claimed work item; ADR-019 SS4.4 permits only a retry
+        of the same logical completion, not a second one).
+
+        `governed_request_json`, when supplied, atomically overwrites this
+        job's stored `request_json` in the same transaction (F1 of the
+        2026-10-13 G0-G6 code review: once a job is terminal, nothing reads
+        its raw request content back again, so it no longer needs to
+        persist). ADR-020: this terminal transition also atomically deletes
+        the job's `job_execution_inputs` row and records a permanent
+        tombstone (`execution_input_tombstones`, A4 of the 2026-10-14
+        ADR-020 review) in the same transaction -- "atomically revoke
+        active payload access ... and schedule deletion."
+
+        A5 of the 2026-10-14 ADR-020 review: for a first-time completion
+        (job currently `RUNNING`, not an idempotent retry of an
+        already-`SUCCEEDED` job), this re-validates the input's own
+        absolute expiry before committing -- raises
+        `storage.errors.ExecutionInputExpired` if it has expired or was
+        destroyed since the claim that produced `result`, refusing to
+        commit a factual verdict over input that is no longer verified.
+        """
         ...
 
     async def fail_job_terminal(
@@ -92,6 +134,9 @@ class StorageBackend(Protocol):
         fencing_token: int,
         error_code: str,
         error_message: str,
+        *,
+        governed_request_json: dict[str, Any] | None = None,
+        terminal_provenance_json: dict[str, Any] | None = None,
     ) -> None:
         """Transition a job to terminal `FAILED` after bounded retries are
         exhausted (`docs/async-evaluation.md`: "keep a sanitized error and
@@ -99,7 +144,22 @@ class StorageBackend(Protocol):
         always operational, never a factual verdict (API.md) -- a factual
         abstention is a `SUCCEEDED` job whose result's status is
         `ABSTAINED`, committed through `commit_evaluation_and_outbox`.
-        Raises `storage.errors.LeaseExpired` on a stale fencing token."""
+        Raises `storage.errors.LeaseExpired` on a stale fencing token.
+
+        `governed_request_json`: see `commit_evaluation_and_outbox`'s own
+        parameter of the same name. ADR-020: this terminal transition also
+        atomically deletes the job's `job_execution_inputs` row and records
+        a permanent tombstone (`execution_input_tombstones`, A4 of the
+        2026-10-14 ADR-020 review), same as `commit_evaluation_and_outbox`.
+
+        `terminal_provenance_json`: P2 of the 2026-10-14 ADR-020 closure
+        review -- when a dispatch already produced real attempt/usage
+        history before this specific rejection (e.g. the input expired
+        between claim and commit), that safe, never content-bearing
+        history is persisted here rather than discarded outright. Not
+        populated by every caller -- only the ones that have real history
+        to preserve.
+        """
         ...
 
     async def release_for_retry(
@@ -163,4 +223,18 @@ class StorageBackend(Protocol):
         acknowledgment (event reclaimed by another worker after this
         worker's lease expired) is a no-op, not an error -- delivery is
         at-least-once by design (CONTRACTS.md)."""
+        ...
+
+    async def purge_expired_execution_inputs(self) -> int:
+        """ADR-020 section 4: delete every `job_execution_inputs` row past
+        its absolute `expires_at`, regardless of the owning job's state --
+        the independent sweep (`worker.expiry_cleanup`) that bounds
+        retention even when no worker ever claims the job at all. Unlike
+        `claim_outbox_batch`/`ack_outbox`, this needs no per-item
+        claim/lease protocol: a plain delete-where-expired is safe to run
+        concurrently from multiple workers (redundant, not racy). Returns
+        the number of rows purged. `PostgresStorageBackend`'s own
+        implementation also logs the oldest expiry age among purged rows
+        on every sweep that finds work -- the cleanup-lag monitoring signal
+        ADR-020 section 4 asks for."""
         ...

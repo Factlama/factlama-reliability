@@ -6,6 +6,7 @@ bounded-retry and cross-attempt `DISPUTED` reconciliation (ADR-015).
 """
 
 import asyncio
+import dataclasses
 from datetime import datetime, timedelta, timezone
 
 from core import provider_identity
@@ -20,7 +21,7 @@ from judges.port import (
 )
 from schemas.claims import Claim, ClaimVerdict, RationaleCode
 from schemas.evidence import Evidence
-from schemas.policy import Policy
+from schemas.policy import ExecutionStorageMode, ExecutionStoragePolicy, Policy
 from schemas.tenancy import TenantContext
 from schemas.verification import VerificationRequest
 from storage.models import ClaimedJob, JobState
@@ -91,6 +92,18 @@ def _failure(code: JudgeErrorCode) -> JudgeResult:
     return JudgeResult(error=JudgeError(code=code, message=f"scripted {code.value}"))
 
 
+def _default_test_policy() -> Policy:
+    """ADR-020: `submit_or_get_job` rejects the default NO_PERSISTENCE mode
+    outright. These tests are about job lifecycle/retry/dispute mechanics,
+    not execution-storage authorization itself, so the shared builder below
+    explicitly authorizes DURABLE_ENCRYPTED to keep testing what it's
+    actually testing -- confining this default's blast radius to one place."""
+    return Policy(
+        id="test-durable",
+        execution_storage=ExecutionStoragePolicy(mode=ExecutionStorageMode.DURABLE_ENCRYPTED),
+    )
+
+
 def _request(
     request_id: str,
     claims: list[Claim],
@@ -106,7 +119,7 @@ def _request(
         answer="placeholder answer -- explicit claims are used unchanged",
         claims=claims,
         evidence=evidence or [],
-        policy=policy,
+        policy=policy or _default_test_policy(),
     )
 
 
@@ -364,7 +377,11 @@ async def test_noncompliant_provider_commits_abstained_no_compliant_provider(
     (`JudgeProvider.compliance_tags` defaults to empty); a policy requiring
     one gates the job before any dispatch, same as the sync pipeline."""
     tenant = make_tenant()
-    policy = Policy(id="strict-policy", required_provider_compliance=["hipaa"])
+    policy = Policy(
+        id="strict-policy",
+        required_provider_compliance=["hipaa"],
+        execution_storage=ExecutionStoragePolicy(mode=ExecutionStorageMode.DURABLE_ENCRYPTED),
+    )
     request = _request(
         "req-7", claims=[Claim(claim_id="c1", text="Paris is the capital.")], policy=policy
     )
@@ -392,11 +409,25 @@ async def test_deadline_already_past_before_any_dispatch_fails_terminal(
 ) -> None:
     """A job claimed after its own overall deadline has already elapsed
     (e.g. a slow queue) must not be misreported as `NO_CHECKABLE_CLAIMS` --
-    it is an operational timeout with real, non-empty claims."""
+    it is an operational timeout with real, non-empty claims.
+
+    2026-10-14 review A7: execution-input expiry is now capped by the job
+    deadline, so submitting with an already-past deadline (the old form of
+    this test) makes the input already-expired too -- `claim_due_job`
+    itself now terminalizes that case (A1's fix) rather than ever handing
+    out a claim. To isolate the property this test actually checks
+    (`_dispatch_with_bounded_retries`'s own pre-attempt deadline check,
+    inside `process_claimed_job`), claim normally with a real future
+    deadline, then override just the in-memory `deadline` the same way a
+    real claim could -- it represents the job's deadline having elapsed by
+    the time this worker got around to processing it, while still holding
+    a genuinely valid lease/fencing token for the stored row.
+    """
     tenant = make_tenant()
     request = _request("req-8", claims=[Claim(claim_id="c1", text="Paris is the capital.")])
+    real_claimed = await _submit_and_claim(backend, tenant, request, "key-8")
     past_deadline = datetime.now(timezone.utc) - timedelta(seconds=1)
-    claimed = await _submit_and_claim(backend, tenant, request, "key-8", deadline=past_deadline)
+    claimed = dataclasses.replace(real_claimed, deadline=past_deadline)
 
     provider = _ScriptedProvider([{"c1": _supported("e1")}])
     verifier = Verifier(model_provider=provider)

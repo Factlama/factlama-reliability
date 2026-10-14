@@ -29,6 +29,7 @@ from core.verifier import Verifier
 from judges.port import CancellationToken, JudgeProvider, JudgeRequest, JudgeResult
 from judges.providers import MockModelProvider
 from schemas.claims import ClaimVerdict
+from schemas.policy import ExecutionStorageMode
 from schemas.tenancy import TenantContext
 from schemas.verification import (
     AbstentionReason,
@@ -139,11 +140,19 @@ class FakeStorageBackend:
         fencing_token: int,
         result: VerificationResult,
         event: OutboxEvent,
+        *,
+        governed_request_json: dict | None = None,
     ) -> None:
         raise NotImplementedError
 
     async def fail_job_terminal(
-        self, job_id: str, fencing_token: int, error_code: str, error_message: str
+        self,
+        job_id: str,
+        fencing_token: int,
+        error_code: str,
+        error_message: str,
+        *,
+        governed_request_json: dict | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -168,7 +177,17 @@ def _build_settings(max_body_bytes: int = 1_000_000) -> Settings:
     settings = Settings.__new__(Settings)
     settings.tenant_store = TenantCredentialStore(
         {
-            TENANT_ONE_KEY: TenantContext(tenant_id="tenant-one"),
+            # Granted DURABLE_ENCRYPTED: this key backs essentially every
+            # async-submission test in this file, and `_valid_async_body()`
+            # already requests DURABLE_ENCRYPTED -- A3 of the 2026-10-14
+            # ADR-020 review means that request alone is no longer
+            # sufficient, the tenant's own trusted grant must also permit
+            # it. `TestExecutionStorageAuthorization` below tests an
+            # ungranted tenant explicitly instead of weakening this one.
+            TENANT_ONE_KEY: TenantContext(
+                tenant_id="tenant-one",
+                execution_storage_grant=ExecutionStorageMode.DURABLE_ENCRYPTED,
+            ),
             TENANT_ONE_SCOPED_KEY: TenantContext(tenant_id="tenant-one", project_id="proj-a"),
             TENANT_TWO_KEY: TenantContext(tenant_id="tenant-two"),
         }
@@ -697,6 +716,18 @@ class TestVerificationResult:
         assert result["claims"][0]["verdict"] == "UNSUPPORTED"
 
 
+def _valid_async_body(project_id: str = "proj-a", application_id: str = "app-a") -> dict:
+    """ADR-020: async submission's default `execution_storage.mode` is
+    `NO_PERSISTENCE`, which rejects durable async outright -- these tests
+    are about idempotency/status/cancellation mechanics, not execution-
+    storage authorization itself (see `TestExecutionStorageAuthorization`
+    for that), so they explicitly authorize `DURABLE_ENCRYPTED` to keep
+    testing what they're actually testing."""
+    body = _valid_body(project_id=project_id, application_id=application_id)
+    body["policy"] = {"id": "test-durable", "execution_storage": {"mode": "DURABLE_ENCRYPTED"}}
+    return body
+
+
 def _idempotency_headers(api_key: str, idempotency_key: str = "idem-1") -> dict[str, str]:
     return {**_auth(api_key), "Idempotency-Key": idempotency_key}
 
@@ -705,7 +736,7 @@ class TestCreateVerificationJob:
     def test_submission_returns_202_with_a_queued_job(self, client: TestClient) -> None:
         response = client.post(
             "/v0.1/verification-jobs",
-            json=_valid_body(),
+            json=_valid_async_body(),
             headers=_idempotency_headers(TENANT_ONE_KEY),
         )
         assert response.status_code == 202
@@ -716,14 +747,14 @@ class TestCreateVerificationJob:
 
     def test_missing_idempotency_key_is_400(self, client: TestClient) -> None:
         response = client.post(
-            "/v0.1/verification-jobs", json=_valid_body(), headers=_auth(TENANT_ONE_KEY)
+            "/v0.1/verification-jobs", json=_valid_async_body(), headers=_auth(TENANT_ONE_KEY)
         )
         assert response.status_code == 400
 
     def test_same_key_and_body_returns_the_same_job(self, client: TestClient) -> None:
         headers = _idempotency_headers(TENANT_ONE_KEY, "idem-same")
-        first = client.post("/v0.1/verification-jobs", json=_valid_body(), headers=headers)
-        second = client.post("/v0.1/verification-jobs", json=_valid_body(), headers=headers)
+        first = client.post("/v0.1/verification-jobs", json=_valid_async_body(), headers=headers)
+        second = client.post("/v0.1/verification-jobs", json=_valid_async_body(), headers=headers)
 
         assert first.status_code == 202
         assert second.status_code == 202
@@ -731,9 +762,9 @@ class TestCreateVerificationJob:
 
     def test_same_key_different_body_is_409(self, client: TestClient) -> None:
         headers = _idempotency_headers(TENANT_ONE_KEY, "idem-conflict")
-        client.post("/v0.1/verification-jobs", json=_valid_body(), headers=headers)
+        client.post("/v0.1/verification-jobs", json=_valid_async_body(), headers=headers)
 
-        conflicting_body = _valid_body()
+        conflicting_body = _valid_async_body()
         conflicting_body["answer"] = "A completely different answer."
         response = client.post("/v0.1/verification-jobs", json=conflicting_body, headers=headers)
 
@@ -742,7 +773,7 @@ class TestCreateVerificationJob:
     def test_cross_tenant_body_is_rejected(self, client: TestClient) -> None:
         response = client.post(
             "/v0.1/verification-jobs",
-            json=_valid_body(project_id="proj-b"),
+            json=_valid_async_body(project_id="proj-b"),
             headers=_idempotency_headers(TENANT_ONE_SCOPED_KEY),
         )
         assert response.status_code == 403
@@ -750,17 +781,97 @@ class TestCreateVerificationJob:
     def test_missing_authorization_is_401(self, client: TestClient) -> None:
         response = client.post(
             "/v0.1/verification-jobs",
-            json=_valid_body(),
+            json=_valid_async_body(),
             headers={"Idempotency-Key": "idem-1"},
         )
         assert response.status_code == 401
+
+
+class TestExecutionStorageAuthorization:
+    """ADR-020: NO_PERSISTENCE is the default and rejects durable async
+    outright; DURABLE_ENCRYPTED is explicit tenant authorization. The
+    synchronous path is unaffected either way -- it never persists."""
+
+    def test_sync_path_succeeds_with_default_no_persistence_policy(
+        self, client: TestClient
+    ) -> None:
+        """The sync route never touches storage, so the default
+        NO_PERSISTENCE execution-storage mode must not block it."""
+        response = client.post(
+            "/v0.1/verifications", json=_valid_body(), headers=_auth(TENANT_ONE_KEY)
+        )
+        assert response.status_code == 200
+
+    def test_async_submission_with_no_policy_is_rejected(self, client: TestClient) -> None:
+        """No policy at all -> the default NO_PERSISTENCE -> rejected,
+        never silently persisted."""
+        response = client.post(
+            "/v0.1/verification-jobs",
+            json=_valid_body(),
+            headers=_idempotency_headers(TENANT_ONE_KEY),
+        )
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "FORBIDDEN"
+        assert "job_id" not in response.json()
+
+    def test_async_submission_with_explicit_no_persistence_is_rejected(
+        self, client: TestClient
+    ) -> None:
+        """Explicitly naming NO_PERSISTENCE must reject identically to
+        omitting the field -- the default and the explicit value are the
+        same guarantee, not two different code paths."""
+        body = _valid_body()
+        body["policy"] = {"id": "strict", "execution_storage": {"mode": "NO_PERSISTENCE"}}
+        response = client.post(
+            "/v0.1/verification-jobs", json=body, headers=_idempotency_headers(TENANT_ONE_KEY)
+        )
+        assert response.status_code == 403
+
+    def test_async_submission_with_durable_encrypted_is_authorized(
+        self, client: TestClient
+    ) -> None:
+        response = client.post(
+            "/v0.1/verification-jobs",
+            json=_valid_async_body(),
+            headers=_idempotency_headers(TENANT_ONE_KEY),
+        )
+        assert response.status_code == 202
+        assert response.json()["state"] == "QUEUED"
+
+    def test_tenant_without_a_grant_cannot_self_authorize_via_request_body(
+        self, client: TestClient
+    ) -> None:
+        """A3 of the 2026-10-14 ADR-020 review: TENANT_TWO_KEY's
+        `TenantContext` carries no `execution_storage_grant` (defaults to
+        NO_PERSISTENCE) -- requesting DURABLE_ENCRYPTED in the body alone
+        must not be sufficient, or any authenticated caller could grant
+        itself durable storage just by changing its own request body."""
+        response = client.post(
+            "/v0.1/verification-jobs",
+            json=_valid_async_body(),
+            headers=_idempotency_headers(TENANT_TWO_KEY),
+        )
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "FORBIDDEN"
+
+    def test_unknown_execution_storage_mode_is_400(self, client: TestClient) -> None:
+        """Contracts/v0.1's ExecutionStorageMode enum rejects an unrecognized
+        value outright -- it must never silently resolve to an authorized
+        mode (CONTRACTS.md: "No missing/unknown setting may silently enable
+        persistence")."""
+        body = _valid_body()
+        body["policy"] = {"id": "bad", "execution_storage": {"mode": "PERSIST_ANYWAY"}}
+        response = client.post(
+            "/v0.1/verification-jobs", json=body, headers=_idempotency_headers(TENANT_ONE_KEY)
+        )
+        assert response.status_code == 400
 
 
 class TestGetVerificationJob:
     def test_returns_the_submitted_jobs_status(self, client: TestClient) -> None:
         submitted = client.post(
             "/v0.1/verification-jobs",
-            json=_valid_body(),
+            json=_valid_async_body(),
             headers=_idempotency_headers(TENANT_ONE_KEY),
         )
         job_id = submitted.json()["job_id"]
@@ -779,7 +890,7 @@ class TestGetVerificationJob:
     def test_other_tenants_job_is_404_not_403(self, client: TestClient) -> None:
         submitted = client.post(
             "/v0.1/verification-jobs",
-            json=_valid_body(),
+            json=_valid_async_body(),
             headers=_idempotency_headers(TENANT_ONE_KEY),
         )
         job_id = submitted.json()["job_id"]
@@ -824,7 +935,7 @@ class TestCancelVerificationJob:
     ) -> None:
         submitted = client.post(
             "/v0.1/verification-jobs",
-            json=_valid_body(),
+            json=_valid_async_body(),
             headers=_idempotency_headers(TENANT_ONE_KEY),
         )
         job_id = submitted.json()["job_id"]
@@ -845,7 +956,7 @@ class TestCancelVerificationJob:
     def test_other_tenants_job_is_404(self, client: TestClient) -> None:
         submitted = client.post(
             "/v0.1/verification-jobs",
-            json=_valid_body(),
+            json=_valid_async_body(),
             headers=_idempotency_headers(TENANT_ONE_KEY),
         )
         job_id = submitted.json()["job_id"]

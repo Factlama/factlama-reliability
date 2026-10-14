@@ -12,6 +12,8 @@ of a live API existing to call it from.
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from schemas.policy import ExecutionStorageMode
+
 
 class TenantContext(BaseModel):
     """Authenticated tenant identity for one call, optionally narrowed to a
@@ -27,6 +29,19 @@ class TenantContext(BaseModel):
     project_id: str | None = Field(None, description="Authorized project scope, if narrowed")
     application_id: str | None = Field(
         None, description="Authorized application scope, if narrowed"
+    )
+    execution_storage_grant: ExecutionStorageMode = Field(
+        default=ExecutionStorageMode.NO_PERSISTENCE,
+        description=(
+            "ADR-020's trusted, operator-configured ceiling on this tenant's "
+            "execution-storage permission -- never set from a request. A3 of "
+            "the 2026-10-14 ADR-020 review: a request's own "
+            "`policy.execution_storage.mode` selection must be intersected "
+            "against this grant (`schemas.policy."
+            "resolve_effective_execution_storage_mode`), not trusted alone, "
+            "or any authenticated caller could grant itself durable storage "
+            "just by changing its own request body."
+        ),
     )
 
     def authorizes(self, project_id: str, application_id: str) -> bool:

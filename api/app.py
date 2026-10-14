@@ -34,10 +34,11 @@ from api.bootstrap import check_storage_ready, lifespan
 from api.errors import ApiError, ApiErrorCode
 from api.settings import Settings, get_settings
 from core.verifier import Verifier, get_default_verifier
+from schemas.policy import ExecutionStorageMode, resolve_effective_execution_storage_mode
 from schemas.tenancy import TenantContext
 from schemas.verification import VerificationRequest
 from storage.backend import StorageBackend
-from storage.errors import JobConflict, JobNotFound
+from storage.errors import ExecutionStorageNotAuthorized, JobConflict, JobNotFound
 from storage.models import Job
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,35 @@ def _authorize_request_scope(
         )
 
 
+def _reject_if_execution_storage_not_authorized(
+    tenant_context: TenantContext, verification_request: VerificationRequest
+) -> None:
+    """ADR-020: durable async submission requires explicit, *trusted*
+    authorization. The request's own `execution_storage.mode` can only ever
+    narrow what `tenant_context.execution_storage_grant` (resolved from
+    authenticated credentials, never the request body) actually permits --
+    A3 of the 2026-10-14 ADR-020 review: an earlier pass checked only the
+    mode the client happened to submit, so any authenticated caller could
+    grant itself durable storage just by changing its own request body.
+    `NO_PERSISTENCE` must reject here, before any content is persisted --
+    "a sync request cannot silently become a persistent job." This is the
+    friendly, early 403; `storage.backend.StorageBackend.submit_or_get_job`
+    enforces the same rule as the real backstop regardless of this check.
+    """
+    policy = verification_request.policy
+    requested = policy.execution_storage.mode if policy else ExecutionStorageMode.NO_PERSISTENCE
+    effective = resolve_effective_execution_storage_mode(
+        requested=requested, tenant_grant=tenant_context.execution_storage_grant
+    )
+    if effective == ExecutionStorageMode.NO_PERSISTENCE:
+        raise ApiError(
+            ApiErrorCode.FORBIDDEN,
+            "execution_storage.mode=NO_PERSISTENCE does not authorize durable async "
+            "submission; use the synchronous API, or have the tenant explicitly "
+            "granted DURABLE_ENCRYPTED",
+        )
+
+
 @app.post("/v0.1/verifications")
 async def create_verification(
     request: Request,
@@ -294,6 +324,7 @@ async def create_verification_job(
     body = await _read_body_within_limit(request, settings.max_body_bytes)
     verification_request = _parse_verification_request(body)
     _authorize_request_scope(tenant_context, verification_request)
+    _reject_if_execution_storage_not_authorized(tenant_context, verification_request)
 
     deadline = datetime.now(timezone.utc) + timedelta(seconds=settings.job_deadline_seconds)
     try:
@@ -309,6 +340,19 @@ async def create_verification_job(
         raise ApiError(
             ApiErrorCode.CONFLICT,
             "Idempotency-Key was already used with a different request body",
+        ) from exc
+    except ExecutionStorageNotAuthorized as exc:
+        # Backstop: _reject_if_execution_storage_not_authorized above should
+        # already have caught this: reaching here means the API-layer check
+        # and the storage layer's own enforcement have diverged, which is
+        # itself worth knowing about, not just silently matching the same 403.
+        logger.error(
+            "Job submission reached storage.submit_or_get_job with an unauthorized "
+            "execution_storage mode despite passing the API-layer check"
+        )
+        raise ApiError(
+            ApiErrorCode.FORBIDDEN,
+            "execution_storage.mode=NO_PERSISTENCE does not authorize durable async submission",
         ) from exc
 
     return JSONResponse(status_code=202, content=_job_status_body(job))

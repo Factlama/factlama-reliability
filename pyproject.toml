@@ -31,6 +31,11 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.0",
     "asyncpg>=0.29.0",
     "alembic>=1.13.0",
+    # ADR-020: DURABLE_ENCRYPTED execution-input storage needs real
+    # authenticated encryption. "Do not implement cryptographic primitives
+    # locally" -- `cryptography` is the maintained, widely-audited
+    # implementation this repo defers to, not a hand-rolled AES-GCM.
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
@@ -211,8 +216,10 @@ forbidden_modules = ["sqlalchemy", "asyncpg", "alembic"]
 # ADR-019 SS3: "API handlers, worker orchestration, and core services
 # consume ports; they do not import concrete backend implementations."
 # G5's async API (PR2) and worker (PR3) depend on storage.backend only;
-# api.bootstrap and worker.bootstrap are the two designated composition-root
-# modules, each exempted below.
+# api.bootstrap, worker.bootstrap and worker.expiry_cleanup_bootstrap (A6
+# of the 2026-10-14 ADR-020 review's standalone cleanup-service
+# composition root) are the three designated composition-root modules,
+# each exempted below.
 name = "domain code, api and worker must depend on storage.backend, not the concrete storage.postgres adapter"
 type = "forbidden"
 source_modules = ["schemas", "core", "judges", "api", "worker"]
@@ -223,4 +230,6 @@ ignore_imports = [
     "worker.bootstrap -> storage.postgres.backend",
     "worker.bootstrap -> storage.postgres.engine",
     "worker.bootstrap -> storage.postgres.registry",
+    "worker.expiry_cleanup_bootstrap -> storage.postgres.backend",
+    "worker.expiry_cleanup_bootstrap -> storage.postgres.engine",
 ]

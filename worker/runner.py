@@ -11,12 +11,14 @@ operational (a typed error), never a factual verdict (API.md).
 import asyncio
 import contextlib
 import logging
+import time
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from core import provider_identity
 from core.budgets import check_request_budget
 from core.compliance import is_provider_compliant
-from core.governance import apply_capture_mode
+from core.governance import apply_capture_mode, governed_request_payload
 from core.verifier import Verifier
 from judges.port import JudgeErrorCode
 from schemas.claims import ClaimVerification
@@ -29,7 +31,7 @@ from schemas.verification import (
     Violation,
 )
 from storage.backend import StorageBackend
-from storage.errors import LeaseExpired
+from storage.errors import EvaluationConflict, ExecutionInputExpired, LeaseExpired
 from storage.models import ClaimedJob
 from storage.registry import RevocationRegistry
 from worker.outbox import build_outbox_event
@@ -42,6 +44,17 @@ logger = logging.getLogger(__name__)
 
 class _CancelledMidDispatch(Exception):
     """Internal signal only: cancellation was observed between attempts."""
+
+
+def _governed_request_json(request: VerificationRequest) -> dict[str, Any]:
+    """The request's own effective capture mode, applied to its own
+    content -- same resolution `_commit` already uses for the result
+    side. Computed fresh at each terminal-transition call site rather than
+    threaded as a parameter, since every call site already has `request`
+    in scope and this keeps the governance policy visibly colocated with
+    where it is about to take effect."""
+    capture_mode = (request.policy or Policy(id="default")).capture.mode
+    return governed_request_payload(request, capture_mode)
 
 
 async def process_claimed_job(
@@ -69,7 +82,11 @@ async def process_claimed_job(
     try:
         if await backend.is_cancellation_requested(claimed.job_id):
             await backend.fail_job_terminal(
-                claimed.job_id, fencing_token, "CANCELLED", "cancelled before dispatch"
+                claimed.job_id,
+                fencing_token,
+                "CANCELLED",
+                "cancelled before dispatch",
+                governed_request_json=_governed_request_json(request),
             )
             return
 
@@ -207,6 +224,7 @@ async def process_claimed_job(
                 fencing_token,
                 JudgeErrorCode.TIMEOUT.value,
                 "overall job deadline exceeded before any attempt could be dispatched",
+                governed_request_json=_governed_request_json(request),
             )
             return
 
@@ -245,14 +263,24 @@ async def process_claimed_job(
     except _CancelledMidDispatch:
         logger.info("Job %s cancelled mid-dispatch", claimed.job_id)
         await _fail_terminal_best_effort(
-            backend, claimed.job_id, fencing_token, "CANCELLED", "cancelled mid-dispatch"
+            backend,
+            claimed.job_id,
+            fencing_token,
+            "CANCELLED",
+            "cancelled mid-dispatch",
+            governed_request_json=_governed_request_json(request),
         )
     except LeaseExpired:
         logger.warning("Job %s: lease lost during processing", claimed.job_id)
     except Exception:
         logger.exception("Job %s: unexpected worker failure", claimed.job_id)
         await _fail_terminal_best_effort(
-            backend, claimed.job_id, fencing_token, "INTERNAL", "unexpected worker failure"
+            backend,
+            claimed.job_id,
+            fencing_token,
+            "INTERNAL",
+            "unexpected worker failure",
+            governed_request_json=_governed_request_json(request),
         )
 
 
@@ -282,21 +310,43 @@ async def _dispatch_with_bounded_retries(
         if await backend.is_cancellation_requested(claimed.job_id):
             raise _CancelledMidDispatch
 
-        if datetime.now(timezone.utc) >= claimed.deadline:
+        # A5 of the 2026-10-14 ADR-020 review: bound dispatch by the
+        # earlier of the job's overall deadline and its execution input's
+        # own absolute expiry -- a result this worker could never actually
+        # commit (input already expired) is not worth dispatching a paid
+        # provider call for in the first place. `input_expires_at` never
+        # exceeds `deadline` by construction (A7's fix to
+        # `submit_or_get_job`), so this is a tightening, never a loosening,
+        # of the existing deadline bound.
+        effective_deadline = min(claimed.deadline, claimed.input_expires_at)
+        remaining = (effective_deadline - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
             logger.warning(
-                "Job %s: overall deadline reached before attempt %d",
+                "Job %s: overall deadline or execution-input expiry reached before attempt %d",
                 claimed.job_id,
                 attempt_number,
             )
             break
 
+        # F3 of the 2026-10-13 G0-G6 code review: this check above only
+        # gates whether a *new* attempt starts -- `dispatch_claims()` used
+        # to apply its own fresh default budget regardless, so a slow call
+        # starting with little of `claimed.deadline` left could still
+        # commit as a trusted late success. Converting the job's real
+        # remaining wall-clock budget to a `time.monotonic()` deadline and
+        # passing it through closes that: `dispatch_claims()`'s own
+        # post-call "provider returned after its deadline" rejection
+        # (`core/verifier.py`) now actually sees the tighter of the two.
+        overall_deadline = time.monotonic() + remaining
         (
             claim_verifications,
             attempts,
             this_calibration_class,
             this_judge_boundary_violations,
             this_usage_budget_violation,
-        ) = verifier.dispatch_claims(claims, claimed.request.evidence)
+        ) = verifier.dispatch_claims(
+            claims, claimed.request.evidence, overall_deadline=overall_deadline
+        )
 
         attempt_claim_verifications.append(claim_verifications)
         all_attempts.extend(attempts)
@@ -376,7 +426,11 @@ async def _commit(
     (`evaluator-registry.md`: "rechecked before result commit"). A provider
     revoked mid-dispatch -- bounded retries above can span real wall-clock
     time -- must not have its already-computed factual verdict committed;
-    `result` is overridden with a fresh REVOKED abstention in that case.
+    `result`'s factual status/verdict is overridden to a REVOKED abstention
+    in that case, via `Verifier.override_with_post_dispatch_abstention()`,
+    which preserves the real attempts/usage already gathered rather than
+    discarding them (unlike `abstained_result()`, which is for a genuinely
+    pre-dispatch gate with nothing real yet to preserve).
     `process_claimed_job`'s own pre-dispatch check is what avoids the
     wasted dispatch in the common case; this recheck is what closes the
     race that check alone cannot.
@@ -393,33 +447,92 @@ async def _commit(
             job_id,
             identity,
         )
-        result = verifier.abstained_result(
-            tenant_id,
-            started_at,
-            request,
-            reason=AbstentionReason.REVOKED,
-            error_label=JudgeErrorCode.REVOKED.value,
-            claim_count=claim_count,
-            trace_id=trace_id,
-            span_id=span_id,
+        result = verifier.override_with_post_dispatch_abstention(
+            result, reason=AbstentionReason.REVOKED, request=request
         )
     capture_mode = (request.policy or Policy(id="default")).capture.mode
     result = apply_capture_mode(result, capture_mode)
     event = build_outbox_event(result)
     try:
-        await backend.commit_evaluation_and_outbox(job_id, fencing_token, result, event)
+        await backend.commit_evaluation_and_outbox(
+            job_id,
+            fencing_token,
+            result,
+            event,
+            governed_request_json=governed_request_payload(request, capture_mode),
+        )
     except LeaseExpired:
         logger.warning(
             "Job %s: lease lost before commit; result discarded, another worker owns it now",
             job_id,
         )
+    except EvaluationConflict:
+        # ADR-019 SS4.4: a byte-identical retry of the *same* logical
+        # completion succeeds silently (storage de-dupes it); a second,
+        # independently-computed completion for an already-SUCCEEDED job
+        # (duplicate delivery of the same claimed work item) is rejected
+        # here instead -- the first completion already stands, so this
+        # one's result is simply discarded, not treated as a worker bug.
+        logger.warning(
+            "Job %s: already succeeded under a different evaluation; discarding this "
+            "duplicate completion",
+            job_id,
+        )
+    except ExecutionInputExpired:
+        # A5 of the 2026-10-14 ADR-020 review: the input expired (and may
+        # already have been purged) between claim and commit -- bounded
+        # retries/backoff can span real wall-clock time. The factual
+        # result just computed is discarded (never committed as a trusted
+        # PASS/FAIL/ABSTAIN); the job itself is still moved to a terminal
+        # state here, using the same still-valid fencing token, rather
+        # than left RUNNING until its lease expires and a future
+        # `claim_due_job` reclaim discovers the same expired input the
+        # slower way.
+        logger.warning(
+            "Job %s: execution input expired or was destroyed before commit; "
+            "discarding the computed result and failing the job operationally",
+            job_id,
+        )
+        await _fail_terminal_best_effort(
+            backend,
+            job_id,
+            fencing_token,
+            "EXECUTION_INPUT_EXPIRED",
+            "execution input expired or was destroyed before completion could be committed",
+            governed_request_json=governed_request_payload(request, capture_mode),
+            # P2 of the 2026-10-14 ADR-020 closure review: the dispatch
+            # already happened -- `result.provenance.attempts`/
+            # `usage_summary` are real, and neither carries claim/evidence
+            # content (provider/model identity, qualification, outcome,
+            # token counts only) -- preserve them on the operational
+            # failure rather than losing them outright just because the
+            # factual verdict itself cannot be trusted/committed.
+            terminal_provenance_json={
+                "attempts": [a.model_dump(mode="json") for a in result.provenance.attempts],
+                "usage_summary": result.usage_summary.model_dump(mode="json"),
+            },
+        )
 
 
 async def _fail_terminal_best_effort(
-    backend: StorageBackend, job_id: str, fencing_token: int, error_code: str, error_message: str
+    backend: StorageBackend,
+    job_id: str,
+    fencing_token: int,
+    error_code: str,
+    error_message: str,
+    *,
+    governed_request_json: dict[str, Any] | None = None,
+    terminal_provenance_json: dict[str, Any] | None = None,
 ) -> None:
     try:
-        await backend.fail_job_terminal(job_id, fencing_token, error_code, error_message)
+        await backend.fail_job_terminal(
+            job_id,
+            fencing_token,
+            error_code,
+            error_message,
+            governed_request_json=governed_request_json,
+            terminal_provenance_json=terminal_provenance_json,
+        )
     except LeaseExpired:
         logger.warning("Job %s: lease already lost; cannot record terminal failure", job_id)
 

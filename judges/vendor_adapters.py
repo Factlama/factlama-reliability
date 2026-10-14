@@ -9,6 +9,7 @@ lazily inside `_get_model()`, but this module is still kept separate from
 vendor model SDK even transitively.
 """
 
+import re
 from typing import Any
 
 from judges.port import (
@@ -23,6 +24,28 @@ from judges.port import (
 from schemas.claims import ClaimVerdict, RationaleCode
 from schemas.instruction import Instruction
 from schemas.policy import Policy
+
+# REL-15's 2026-09-21 agreement-harness run found `EmbeddingProvider` flips
+# 2 of 5 adversarial-injection fixtures to SUPPORTED (ADR-013's zero-flip
+# disqualifier). Neither flip is actually caused by the injected
+# instruction text -- cosine similarity has no notion of "obeying" a
+# prompt -- both are genuine negation blindness: evidence on the same
+# topic as the claim ("...has not undergone FDA review" for "is FDA
+# approved"; "no law degree" for "has a law degree") sits at high semantic
+# similarity despite asserting the opposite, the same failure mode
+# `_check_numerical_contradiction` below already exists to catch for
+# numbers specifically. This is a sibling check for negation words,
+# deliberately small and hand-curated like that one and like
+# `judges/port.py`'s `_CITATION_OVERLAP_SYNONYMS_V1` -- it is not a parser,
+# just a guard against the clearest case: a bare positive assertion on one
+# side and an explicit negation of the same assertion on the other.
+_NEGATION_CUES_V1 = re.compile(
+    r"\b(not|no|never|nor|without|cannot|unable|lacks?|fails?\s+to)\b|n't\b"
+)
+
+
+def _has_negation_cue(text: str) -> bool:
+    return _NEGATION_CUES_V1.search(text.lower()) is not None
 
 
 class EmbeddingProvider(JudgeProvider):
@@ -139,11 +162,13 @@ class EmbeddingProvider(JudgeProvider):
                 claim_embedding.unsqueeze(0), evidence_embedding.unsqueeze(0)
             ).item()
 
-            # Also check for numerical contradiction
-            has_numerical_contradiction = self._check_numerical_contradiction(claim.text, ev_text)
+            # Also check for numerical or negation contradiction
+            has_contradiction_signal = self._check_numerical_contradiction(
+                claim.text, ev_text
+            ) or self._check_negation_contradiction(claim.text, ev_text)
 
-            if has_numerical_contradiction and similarity > self.support_threshold:
-                # High semantic similarity but numerical contradiction
+            if has_contradiction_signal and similarity > self.support_threshold:
+                # High semantic similarity but a detected contradiction
                 matches.append((ev.evidence_id, -similarity, similarity))
             elif similarity >= self.support_threshold:
                 matches.append((ev.evidence_id, similarity, similarity))
@@ -155,13 +180,20 @@ class EmbeddingProvider(JudgeProvider):
         # Determine verdict
         if (
             best_evidence is not None
-            and self._check_numerical_contradiction(claim.text, best_evidence.content or "")
             and best_similarity > self.support_threshold
+            and (
+                self._check_numerical_contradiction(claim.text, best_evidence.content or "")
+                or self._check_negation_contradiction(claim.text, best_evidence.content or "")
+            )
         ):
             verdict = ClaimVerdict.CONTRADICTED
             evidence_ids = [best_evidence.evidence_id]
-            rationale_code = RationaleCode.NUMERICAL_CONTRADICTION
-            reason = "Semantic similarity but numerical contradiction detected"
+            rationale_code = (
+                RationaleCode.NUMERICAL_CONTRADICTION
+                if self._check_numerical_contradiction(claim.text, best_evidence.content or "")
+                else RationaleCode.CONTRADICTION_DETECTED
+            )
+            reason = "Semantic similarity but a contradiction was detected"
         elif matches:
             best_support = max(support for _, support, _ in matches)
             if best_support >= self.support_threshold:
@@ -202,8 +234,6 @@ class EmbeddingProvider(JudgeProvider):
 
     def _check_numerical_contradiction(self, claim: str, evidence_text: str) -> bool:
         """Check for numerical contradictions between claim and evidence."""
-        import re
-
         claim_numbers = re.findall(r"\d+(?:\.\d+)?", claim)
         evidence_numbers = re.findall(r"\d+(?:\.\d+)?", evidence_text)
 
@@ -218,6 +248,35 @@ class EmbeddingProvider(JudgeProvider):
 
         # If texts are similar (> 60% word overlap) but numbers differ
         return similarity > 0.6 and claim_numbers != evidence_numbers
+
+    def _check_negation_contradiction(self, claim: str, evidence_text: str) -> bool:
+        """Catch the negation-blindness gap plain cosine similarity has:
+        evidence substantially on-topic with the claim (shared vocabulary)
+        but negating it ("is FDA approved" vs. "has not undergone FDA
+        review") sits at high embedding similarity despite asserting the
+        opposite. Mirrors `_check_numerical_contradiction`'s shape and
+        word-overlap signal, just for a negation-cue asymmetry instead of
+        differing numbers.
+
+        Threshold chosen against this repo's public dev fixtures only
+        (`tests/fixtures/agreement/dev/adversarial_injection.json`: 0.6
+        overlap on the one real contradiction there, 0.25 on the one
+        non-contradiction), then confirmed -- not tuned -- against the
+        FactLama-held-out set's own adversarial fixture (0.5 overlap),
+        matching REL-15's established calibration discipline.
+        """
+        claim_has_negation = _has_negation_cue(claim)
+        evidence_has_negation = _has_negation_cue(evidence_text)
+        if claim_has_negation == evidence_has_negation:
+            # Both or neither negate -- no asymmetry to signal a flip in
+            # polarity between claim and evidence.
+            return False
+
+        claim_words = set(claim.lower().split())
+        ev_words = set(evidence_text.lower().split())
+        overlap = claim_words & ev_words
+        topical_overlap = len(overlap) / len(claim_words) if claim_words else 0.0
+        return topical_overlap >= 0.45
 
     def _calculate_confidence(
         self,

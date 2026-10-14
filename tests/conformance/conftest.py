@@ -20,6 +20,8 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine
 from testcontainers.community.postgres import PostgresContainer
 
+from core.execution_storage import ExecutionStorageKeyring
+from schemas.policy import ExecutionStorageMode, ExecutionStoragePolicy, Policy
 from schemas.tenancy import TenantContext
 from schemas.verification import (
     AbstentionReason,
@@ -62,9 +64,26 @@ async def engine(postgres_container: PostgresContainer) -> AsyncIterator[AsyncEn
     await eng.dispose()
 
 
+TEST_EXECUTION_STORAGE_KEY_ID = "test-v1"
+TEST_EXECUTION_STORAGE_KEY = b"\x42" * 32  # AES-256; a fixed, known-bad-for-prod test key.
+
+
+def make_test_execution_storage_keyring() -> ExecutionStorageKeyring:
+    """A real, functioning keyring (not a fake/mock) backing every
+    DURABLE_ENCRYPTED conformance test by default -- ADR-020's encryption
+    path is exercised for real against real Postgres, the same discipline
+    this whole suite already applies everywhere else."""
+    return ExecutionStorageKeyring(
+        {TEST_EXECUTION_STORAGE_KEY_ID: TEST_EXECUTION_STORAGE_KEY},
+        active_key_id=TEST_EXECUTION_STORAGE_KEY_ID,
+    )
+
+
 @pytest_asyncio.fixture
 async def backend(engine: AsyncEngine) -> PostgresStorageBackend:
-    return PostgresStorageBackend(engine)
+    return PostgresStorageBackend(
+        engine, execution_storage_keyring=make_test_execution_storage_keyring()
+    )
 
 
 @pytest_asyncio.fixture
@@ -76,8 +95,38 @@ def make_tenant(
     tenant_id: str = "tenant-a",
     project_id: str = "proj-a",
     application_id: str = "app-a",
+    execution_storage_grant: ExecutionStorageMode = ExecutionStorageMode.DURABLE_ENCRYPTED,
 ) -> TenantContext:
-    return TenantContext(tenant_id=tenant_id, project_id=project_id, application_id=application_id)
+    """Granted DURABLE_ENCRYPTED by default -- A3 of the 2026-10-14 ADR-020
+    review: `submit_or_get_job` now also requires the tenant's own trusted
+    grant, not just the request's `policy.execution_storage.mode`
+    (`default_test_execution_storage_policy` below already requests it).
+    Most of this suite is about idempotency/lease/atomicity mechanics, not
+    execution-storage authorization itself, so this default confines that
+    new requirement's blast radius here, the same way the original
+    NO_PERSISTENCE default was confined when it shipped. Tests specifically
+    about tenant authorization pass `execution_storage_grant=NO_PERSISTENCE`
+    explicitly instead of relying on this default."""
+    return TenantContext(
+        tenant_id=tenant_id,
+        project_id=project_id,
+        application_id=application_id,
+        execution_storage_grant=execution_storage_grant,
+    )
+
+
+def default_test_execution_storage_policy() -> Policy:
+    """ADR-020: `submit_or_get_job` rejects the default NO_PERSISTENCE mode
+    outright. Most of this suite's tests are about idempotency/lease/
+    atomicity mechanics, not execution-storage authorization itself, so
+    this shared default explicitly authorizes DURABLE_ENCRYPTED -- confining
+    the new default's blast radius to one place rather than every call
+    site. Tests specifically about execution-storage authorization
+    construct their own `Policy` explicitly instead of using this."""
+    return Policy(
+        id="test-durable",
+        execution_storage=ExecutionStoragePolicy(mode=ExecutionStorageMode.DURABLE_ENCRYPTED),
+    )
 
 
 def make_request(
@@ -85,12 +134,14 @@ def make_request(
     project_id: str = "proj-a",
     application_id: str = "app-a",
     answer: str = "The sky is blue.",
+    policy: Policy | None = None,
 ) -> VerificationRequest:
     return VerificationRequest(
         request_id=request_id,
         project_id=project_id,
         application_id=application_id,
         answer=answer,
+        policy=policy or default_test_execution_storage_policy(),
     )
 
 

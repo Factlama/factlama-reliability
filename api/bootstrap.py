@@ -41,7 +41,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 500.
     await check_ready(engine)
     app.state.storage_engine = engine
-    app.state.storage_backend = PostgresStorageBackend(engine)
+    app.state.storage_backend = PostgresStorageBackend(
+        engine,
+        execution_storage_keyring=settings.execution_storage_keyring,
+        default_execution_input_ttl_seconds=settings.execution_input_ttl_seconds,
+    )
     logger.info("storage backend ready")
     try:
         yield

@@ -77,6 +77,15 @@ class ClaimedJob:
     deadline" for the retry/backoff budget), not the per-lease expiry --
     `lease_expires_at` is a worker-liveness mechanism the caller renews;
     `deadline` is a fixed budget the caller cannot extend."""
+    input_expires_at: datetime
+    """A5 of the 2026-10-14 ADR-020 review: the execution input's own
+    absolute expiry (always <= `deadline`, per A7's fix to
+    `submit_or_get_job`), carried through the claim so dispatch can bound
+    itself by the earlier of the two, and so a late commit can be rejected
+    if this has passed even though `deadline` technically has not (it
+    cannot, given the invariant above, but this makes the real constraint
+    explicit rather than re-deriving it from `deadline` at every call
+    site)."""
     lease_expires_at: datetime
 
 

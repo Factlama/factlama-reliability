@@ -19,7 +19,13 @@ import pytest
 from core.verifier import Verifier
 from schemas.claims import Claim, TextStatus
 from schemas.evidence import Evidence
-from schemas.policy import CaptureMode, CapturePolicy, Policy
+from schemas.policy import (
+    CaptureMode,
+    CapturePolicy,
+    ExecutionStorageMode,
+    ExecutionStoragePolicy,
+    Policy,
+)
 from schemas.verification import VerificationRequest
 from storage.errors import JobNotFound
 from storage.postgres.backend import PostgresStorageBackend
@@ -117,7 +123,12 @@ async def test_metadata_only_capture_mode_persists_no_claim_text_end_to_end(
     `text_status=NOT_STORED` and `text=None`, per CONTRACTS.md."""
     tenant = make_tenant()
     policy = Policy(
-        id="metadata-only-policy", capture=CapturePolicy(mode=CaptureMode.METADATA_ONLY)
+        id="metadata-only-policy",
+        capture=CapturePolicy(mode=CaptureMode.METADATA_ONLY),
+        # ADR-020: submit_or_get_job rejects the default NO_PERSISTENCE
+        # outright -- this test is about capture mode, not execution-storage
+        # authorization, so explicitly authorize durable submission.
+        execution_storage=ExecutionStoragePolicy(mode=ExecutionStorageMode.DURABLE_ENCRYPTED),
     )
     request = VerificationRequest(
         request_id="req-governed",
@@ -159,7 +170,11 @@ async def test_full_capture_mode_persists_claim_text_end_to_end(
     """The explicit-opt-in counterpart (ADR-008: "FULL requires explicit
     tenant opt-in") -- choosing FULL is that opt-in."""
     tenant = make_tenant()
-    policy = Policy(id="full-capture-policy", capture=CapturePolicy(mode=CaptureMode.FULL))
+    policy = Policy(
+        id="full-capture-policy",
+        capture=CapturePolicy(mode=CaptureMode.FULL),
+        execution_storage=ExecutionStoragePolicy(mode=ExecutionStorageMode.DURABLE_ENCRYPTED),
+    )
     request = VerificationRequest(
         request_id="req-full",
         project_id="proj-a",

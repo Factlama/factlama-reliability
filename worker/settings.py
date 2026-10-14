@@ -6,6 +6,8 @@ at the first poll (ADR-019 SS3's "fail startup/readiness explicitly").
 
 import os
 
+from core.execution_storage import ExecutionStorageKeyring
+
 DEFAULT_LEASE_DURATION_SECONDS = 120.0
 """How long a claimed job's lease lasts before it is eligible for reclaim
 by another worker (docs/async-evaluation.md). Must comfortably exceed one
@@ -30,6 +32,12 @@ DEFAULT_BACKOFF_JITTER_FRACTION = 0.2
 DEFAULT_OUTBOX_BATCH_SIZE = 20
 DEFAULT_OUTBOX_LEASE_SECONDS = 60.0
 DEFAULT_OUTBOX_POLL_INTERVAL_SECONDS = 2.0
+
+# ADR-020: how often the independent expiry-cleanup loop sweeps for
+# job_execution_inputs rows past their absolute expires_at, regardless of
+# the owning job's state -- this is what bounds retention even when
+# workers stop entirely and a job never reaches a terminal state.
+DEFAULT_EXECUTION_INPUT_SWEEP_INTERVAL_SECONDS = 30.0
 
 
 class WorkerSettings:
@@ -69,4 +77,19 @@ class WorkerSettings:
                 "FACTLAMA_WORKER_OUTBOX_POLL_INTERVAL_SECONDS",
                 DEFAULT_OUTBOX_POLL_INTERVAL_SECONDS,
             )
+        )
+        self.execution_input_sweep_interval_seconds = float(
+            os.environ.get(
+                "FACTLAMA_WORKER_EXECUTION_INPUT_SWEEP_INTERVAL_SECONDS",
+                DEFAULT_EXECUTION_INPUT_SWEEP_INTERVAL_SECONDS,
+            )
+        )
+        # ADR-020: the worker needs this to decrypt a DURABLE_ENCRYPTED job's
+        # input at claim time -- same env vars as api/settings.py, so both
+        # processes resolve the same keys. An empty/missing keyring is valid
+        # construction here too; `claim_due_job` fails loudly only if a
+        # claimed row actually needs a key this keyring doesn't have.
+        self.execution_storage_keyring = ExecutionStorageKeyring.from_env(
+            os.environ.get("FACTLAMA_EXECUTION_STORAGE_KEYS"),
+            os.environ.get("FACTLAMA_EXECUTION_STORAGE_ACTIVE_KEY_ID"),
         )
