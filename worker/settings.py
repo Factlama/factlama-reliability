@@ -32,6 +32,7 @@ DEFAULT_BACKOFF_JITTER_FRACTION = 0.2
 DEFAULT_OUTBOX_BATCH_SIZE = 20
 DEFAULT_OUTBOX_LEASE_SECONDS = 60.0
 DEFAULT_OUTBOX_POLL_INTERVAL_SECONDS = 2.0
+DEFAULT_OBSERVABILITY_INGRESS_TIMEOUT_SECONDS = 10.0
 
 # ADR-020: how often the independent expiry-cleanup loop sweeps for
 # job_execution_inputs rows past their absolute expires_at, regardless of
@@ -92,4 +93,20 @@ class WorkerSettings:
         self.execution_storage_keyring = ExecutionStorageKeyring.from_env(
             os.environ.get("FACTLAMA_EXECUTION_STORAGE_KEYS"),
             os.environ.get("FACTLAMA_EXECUTION_STORAGE_ACTIVE_KEY_ID"),
+        )
+        # G6 handoff: the base URL of Observability's internal ingress
+        # (e.g. "https://observability.internal:8000"). Left unset, outbox
+        # delivery falls back to `worker.outbox_delivery.log_only_deliver`
+        # (`worker/bootstrap.py`) -- the same explicit, logged stand-in
+        # used before G6's ingress existed, not a silent no-op. Set this
+        # and `observability_workload_token` together; the ingress
+        # authenticates every request against the matching
+        # `FACTLAMA_RELIABILITY_WORKLOAD_TOKEN` on its own side.
+        self.observability_ingress_url = os.environ.get("FACTLAMA_OBSERVABILITY_INGRESS_URL")
+        self.observability_workload_token = os.environ.get("FACTLAMA_OBSERVABILITY_WORKLOAD_TOKEN")
+        self.observability_ingress_timeout_seconds = float(
+            os.environ.get(
+                "FACTLAMA_OBSERVABILITY_INGRESS_TIMEOUT_SECONDS",
+                DEFAULT_OBSERVABILITY_INGRESS_TIMEOUT_SECONDS,
+            )
         )
