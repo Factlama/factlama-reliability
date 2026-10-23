@@ -57,7 +57,32 @@ def _observability_repo_dir() -> Path | None:
     return path if path.is_dir() and venv_python.is_file() else None
 
 
+def _running_in_ci() -> bool:
+    """Same rationale as `tests/test_contract_fixtures.py::_running_in_ci`
+    (F10 of the 2026-09-21 G0-G4 validation report, extended here per the
+    2026-10-23 G6 review's stage-1 baseline requirement): a missing sibling
+    checkout is a reasonable skip for a contributor's local venv outside the
+    three-repo workspace, but this cross-repo delivery test is the one
+    integration test the "Cross-repository handoffs" table in
+    `EXECUTION_PLAN.md` requires for the Reliability outbox -> Observability
+    ingress handoff -- it must not be reasonable for CI to silently skip its
+    one required test for that handoff just because a checkout/provisioning
+    step broke."""
+    return os.environ.get("CI", "").lower() in ("1", "true") or bool(
+        os.environ.get("GITHUB_ACTIONS")
+    )
+
+
 OBSERVABILITY_DIR = _observability_repo_dir()
+
+if OBSERVABILITY_DIR is None and _running_in_ci():
+    raise RuntimeError(
+        "FACTLAMA_OBSERVABILITY_REPO_DIR is unset, or its .venv is not provisioned, in "
+        "a CI run. This cross-repo delivery test is a required handoff acceptance test, "
+        "not an optional local-dev check -- refusing to silently skip it. This usually "
+        "means the 'Checkout factlama-observability' or 'Provision factlama-observability "
+        "venv' step in ci.yml failed or was removed."
+    )
 
 pytestmark = pytest.mark.skipif(
     OBSERVABILITY_DIR is None,

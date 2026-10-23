@@ -28,12 +28,33 @@ jobs:
           ref: e2a022e8187e72708a224ac29d5cc8575b004af2
           path: factlama-architecture
 
+      # 2026-10-23 G6 review, stage 1 (baseline): tests/conformance/test_outbox_cross_repo_delivery.py
+      # previously skipped silently whenever this sibling checkout was
+      # absent, which made CI's run of the one required integration test
+      # for the "Reliability outbox -> Observability ingress" handoff
+      # (EXECUTION_PLAN.md's "Cross-repository handoffs" table) a no-op
+      # without ever failing. Pinned to a known-compatible commit for the
+      # same reason the factlama-architecture checkout above is pinned;
+      # bump this `ref` deliberately alongside any contract-affecting
+      # change to either repo's outbox/ingress wire shape.
+      - name: Checkout factlama-observability (G6 cross-repo delivery handoff)
+        uses: actions/checkout@v4
+        with:
+          repository: Factlama/factlama-observability
+          ref: 50b4bce99bbd67291507f1811ee9d32256a3f802
+          path: factlama-observability
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install package with dev extras
         run: pip install -e ".[dev]"
+
+      - name: Provision factlama-observability venv (for the cross-repo delivery test)
+        run: |
+          python -m venv factlama-observability/.venv
+          factlama-observability/.venv/bin/pip install -e "./factlama-observability[dev]"
 
       - name: Lint (ruff check)
         run: ruff check .
@@ -57,3 +78,4 @@ jobs:
         run: pytest --cov=schemas --cov=core --cov=judges --cov=api --cov=storage --cov=worker --cov-report=term-missing
         env:
           FACTLAMA_CONTRACTS_DIR: ${{ github.workspace }}/factlama-architecture/contracts/v0.1
+          FACTLAMA_OBSERVABILITY_REPO_DIR: ${{ github.workspace }}/factlama-observability
