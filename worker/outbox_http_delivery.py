@@ -87,6 +87,27 @@ def build_http_deliver(client: httpx.AsyncClient, settings: WorkerSettings) -> D
                 f"event {event.event_id}: ingress rejected delivery with "
                 f"HTTP {response.status_code}: {response.text}"
             )
+        # A 200 alone does not prove the ingress accepted *this* event -- a
+        # misconfigured base_url or an intermediary proxy can return 200
+        # with unrelated content. Require the receipt to name this event's
+        # own id and an accepted/duplicate outcome before acking (P2,
+        # review-evidence/g6-2026-10-22/REVIEW.md).
+        try:
+            receipt = response.json()
+        except ValueError as exc:
+            raise HttpOutboxDeliveryError(
+                f"event {event.event_id}: ingress returned 200 with a non-JSON body: "
+                f"{response.text!r}"
+            ) from exc
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("event_id") != event.event_id
+            or receipt.get("status") not in ("accepted", "duplicate")
+        ):
+            raise HttpOutboxDeliveryError(
+                f"event {event.event_id}: ingress returned 200 with an unrecognized "
+                f"receipt {receipt!r}"
+            )
         return True
 
     return deliver

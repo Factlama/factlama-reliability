@@ -101,6 +101,49 @@ async def test_non_200_response_raises_for_retry(status_code: int) -> None:
     await client.aclose()
 
 
+async def test_200_with_a_different_events_receipt_raises_for_retry() -> None:
+    """P2, `review-evidence/g6-2026-10-22/REVIEW.md`: a 200 alone does not
+    prove the ingress accepted *this* event -- a misconfigured base_url or
+    an intermediary proxy could return 200 for something else entirely."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"event_id": "some-other-event", "status": "accepted"})
+
+    client = httpx.AsyncClient(
+        base_url="http://observability.test", transport=httpx.MockTransport(handler)
+    )
+    deliver = build_http_deliver(client, _settings())
+    with pytest.raises(HttpOutboxDeliveryError):
+        await deliver(_event())
+    await client.aclose()
+
+
+async def test_200_with_an_unrecognized_status_raises_for_retry() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"event_id": "event-1", "status": "queued"})
+
+    client = httpx.AsyncClient(
+        base_url="http://observability.test", transport=httpx.MockTransport(handler)
+    )
+    deliver = build_http_deliver(client, _settings())
+    with pytest.raises(HttpOutboxDeliveryError):
+        await deliver(_event())
+    await client.aclose()
+
+
+async def test_200_with_a_non_json_body_raises_for_retry() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"OK")
+
+    client = httpx.AsyncClient(
+        base_url="http://observability.test", transport=httpx.MockTransport(handler)
+    )
+    deliver = build_http_deliver(client, _settings())
+    with pytest.raises(HttpOutboxDeliveryError):
+        await deliver(_event())
+    await client.aclose()
+
+
 async def test_transport_failure_raises_for_retry() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused")

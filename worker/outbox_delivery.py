@@ -23,8 +23,11 @@ DeliverFn = Callable[[OutboxEvent], Awaitable[bool]]
 
 
 async def log_only_deliver(event: OutboxEvent) -> bool:
-    """The default `deliver` callable: logs the event and reports success.
-    Stands in for G6's real ingress, which does not exist yet."""
+    """A `deliver` callable for tests/dev tooling that want to observe the
+    loop's claim/ack mechanics without a real consumer. Reports success --
+    never use this for a production deployment, where an unconfigured
+    consumer must leave events unacked (see `unconfigured_deliver`), not
+    silently acknowledge them as delivered."""
     logger.info(
         "outbox event %s ready for delivery: tenant=%s evaluation=%s status=%s",
         event.event_id,
@@ -33,6 +36,25 @@ async def log_only_deliver(event: OutboxEvent) -> bool:
         event.status,
     )
     return True
+
+
+class DeliveryNotConfiguredError(RuntimeError):
+    """Raised by `unconfigured_deliver` for every event, so
+    `run_outbox_delivery_loop`'s existing `except Exception` handling
+    leaves it unacked -- an operator who later configures
+    `FACTLAMA_OBSERVABILITY_INGRESS_URL` gets every event delivered, not
+    just the ones committed after that point. Acknowledging delivery that
+    never happened would violate CONTRACTS.md's "delivery retries; duplicate
+    does not double-count" -- there is no way to un-ack a row later."""
+
+
+async def unconfigured_deliver(event: OutboxEvent) -> bool:
+    """The production fallback when no real consumer is configured:
+    refuses to acknowledge, unlike `log_only_deliver`."""
+    raise DeliveryNotConfiguredError(
+        f"event {event.event_id}: FACTLAMA_OBSERVABILITY_INGRESS_URL is not set; "
+        "refusing to acknowledge an event that was never sent"
+    )
 
 
 async def run_outbox_delivery_loop(

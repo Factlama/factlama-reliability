@@ -26,7 +26,7 @@ from core.verifier import Verifier
 from storage.postgres.backend import PostgresStorageBackend
 from storage.postgres.engine import check_ready, close_engine, create_storage_engine
 from storage.postgres.registry import PostgresRevocationRegistry
-from worker.outbox_delivery import DeliverFn, log_only_deliver, run_outbox_delivery_loop
+from worker.outbox_delivery import DeliverFn, run_outbox_delivery_loop, unconfigured_deliver
 from worker.outbox_http_delivery import build_http_deliver
 from worker.runner import run_poll_loop
 from worker.settings import WorkerSettings
@@ -37,14 +37,18 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def _outbox_deliver(settings: WorkerSettings) -> AsyncIterator[DeliverFn]:
     """G6 handoff: a real HTTP `deliver` when Observability's ingress is
-    configured, else the explicit, logged `log_only_deliver` stand-in --
-    never a silent no-op either way."""
+    configured, else `unconfigured_deliver`, which leaves every event
+    unacked rather than silently dropping it -- a P1 found by the
+    2026-10-22 independent review (`review-evidence/g6-2026-10-22/REVIEW.md`):
+    the previous `log_only_deliver` fallback acknowledged events without
+    sending them, so configuring the ingress later could never recover
+    them."""
     if settings.observability_ingress_url is None:
         logger.warning(
-            "FACTLAMA_OBSERVABILITY_INGRESS_URL is not set; outbox events will only be "
-            "logged, not delivered to Observability"
+            "FACTLAMA_OBSERVABILITY_INGRESS_URL is not set; outbox events will accumulate "
+            "unacked until it is configured"
         )
-        yield log_only_deliver
+        yield unconfigured_deliver
         return
     async with httpx.AsyncClient(
         base_url=settings.observability_ingress_url,
