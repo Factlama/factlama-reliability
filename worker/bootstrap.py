@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 
+from core.execution_storage import enforce_retired_keys_are_absent
 from core.verifier import Verifier
 from storage.postgres.backend import PostgresStorageBackend
 from storage.postgres.engine import check_ready, close_engine, create_storage_engine
@@ -70,6 +71,16 @@ def _install_shutdown_handlers(stop_event: asyncio.Event) -> None:
 
 async def run() -> None:
     settings = WorkerSettings()
+    # ADR-020 section 5's mandatory restore procedure: refuse to start
+    # (never mind claim a job) against a restored database before any
+    # key_id named in FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS is
+    # actually gone from the configured keyring. Checked before the
+    # database is even touched, since this is pure configuration.
+    enforce_retired_keys_are_absent(
+        settings.execution_storage_keyring,
+        settings.retired_execution_storage_key_ids,
+        settings.execution_storage_restore_mode,
+    )
     engine = create_storage_engine(settings.database_url)
     # ADR-019 SS3: fail startup explicitly rather than polling against a
     # database that was never reachable in the first place.

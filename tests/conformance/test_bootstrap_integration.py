@@ -19,6 +19,7 @@ from testcontainers.community.postgres import PostgresContainer
 
 from api.app import app
 from api.settings import get_settings
+from core.execution_storage import ExecutionStorageConfigurationError
 from tests.conformance.conftest import TEST_EXECUTION_STORAGE_KEY, TEST_EXECUTION_STORAGE_KEY_ID
 
 
@@ -95,3 +96,117 @@ def test_submit_then_read_a_job_through_the_real_composition_root(
     status = live_app_client.get(f"/v0.1/verification-jobs/{job_id}", headers=_auth())
     assert status.status_code == 200
     assert status.json()["state"] == "QUEUED"
+
+
+def _set_database_and_active_key_env(
+    postgres_container: PostgresContainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = postgres_container.get_connection_url()
+    _, _, rest = raw.partition("://")
+    monkeypatch.setenv("FACTLAMA_DATABASE_URL", f"postgresql+asyncpg://{rest}")
+    monkeypatch.setenv(
+        "FACTLAMA_EXECUTION_STORAGE_KEYS",
+        json.dumps(
+            {TEST_EXECUTION_STORAGE_KEY_ID: base64.b64encode(TEST_EXECUTION_STORAGE_KEY).decode()}
+        ),
+    )
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_ACTIVE_KEY_ID", TEST_EXECUTION_STORAGE_KEY_ID)
+
+
+def test_api_refuses_to_start_when_a_declared_retired_key_is_still_configured(
+    engine: AsyncEngine,  # ensures the schema exists, matching live_app_client's own fixture
+    postgres_container: PostgresContainer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-020 section 5's mandatory restore procedure, enforced
+    mechanically: declaring a key_id retired (as an operator restoring
+    from backup must) while that same key_id is still present in
+    FACTLAMA_EXECUTION_STORAGE_KEYS must refuse to start the real
+    composition root entirely -- never mind serve traffic -- rather than
+    trusting that the runbook step was actually followed. Deliberately
+    does not reuse `live_app_client`: that fixture's own `with
+    TestClient(app)` is expected to succeed, so a startup failure here
+    needs its own `pytest.raises` around entering the context."""
+    _set_database_and_active_key_env(postgres_container, monkeypatch)
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE", "RESTORE")
+    # The declared-retired key_id is the exact one still configured above --
+    # the operator restoring from backup forgot (or never performed) the
+    # actual key removal this procedure exists to make mandatory.
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS", TEST_EXECUTION_STORAGE_KEY_ID)
+    get_settings.cache_clear()
+    try:
+        with (
+            pytest.raises(ExecutionStorageConfigurationError, match=TEST_EXECUTION_STORAGE_KEY_ID),
+            TestClient(app),
+        ):
+            pass
+    finally:
+        get_settings.cache_clear()
+
+
+def test_api_refuses_to_start_when_restore_mode_has_an_empty_manifest(
+    engine: AsyncEngine,
+    postgres_container: PostgresContainer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declaring `RESTORE_MODE=RESTORE` without naming any key to retire
+    must not be a no-op way to "confirm" the restore procedure without
+    doing anything -- the manifest must actually be non-empty."""
+    _set_database_and_active_key_env(postgres_container, monkeypatch)
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE", "RESTORE")
+    monkeypatch.delenv("FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS", raising=False)
+    get_settings.cache_clear()
+    try:
+        with (
+            pytest.raises(ExecutionStorageConfigurationError, match="RESTORE_MODE=RESTORE"),
+            TestClient(app),
+        ):
+            pass
+    finally:
+        get_settings.cache_clear()
+
+
+def test_api_refuses_to_start_with_an_invalid_restore_mode_value(
+    engine: AsyncEngine,
+    postgres_container: PostgresContainer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo in FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE must fail loudly
+    at real startup, not silently fall back to NORMAL."""
+    _set_database_and_active_key_env(postgres_container, monkeypatch)
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE", "RESTOER")
+    get_settings.cache_clear()
+    try:
+        with (
+            pytest.raises(ExecutionStorageConfigurationError, match="RESTOER"),
+            TestClient(app),
+        ):
+            pass
+    finally:
+        get_settings.cache_clear()
+
+
+def test_api_starts_successfully_once_declared_retired_keys_are_actually_removed(
+    engine: AsyncEngine,
+    postgres_container: PostgresContainer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The positive path this whole procedure exists to allow: an operator
+    declares the restore, names the key that could have encrypted a now-
+    stale row, and has actually rotated it out of the active keyring --
+    startup must succeed."""
+    _set_database_and_active_key_env(postgres_container, monkeypatch)
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE", "RESTORE")
+    # Retiring a key_id that was never active in the first place is exactly
+    # what "actually removed it" looks like from this gate's perspective --
+    # the active keyring above only ever configured TEST_EXECUTION_STORAGE_KEY_ID.
+    monkeypatch.setenv(
+        "FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS", "some-retired-key-from-the-backup"
+    )
+    get_settings.cache_clear()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/health/ready")
+            assert response.status_code == 200
+    finally:
+        get_settings.cache_clear()

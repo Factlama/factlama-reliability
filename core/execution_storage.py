@@ -169,3 +169,96 @@ class ExecutionStorageKeyring:
 
     def has_any_key(self) -> bool:
         return bool(self._keys)
+
+    def key_ids(self) -> frozenset[str]:
+        return frozenset(self._keys)
+
+
+def parse_retired_key_ids(env_value: str | None) -> frozenset[str]:
+    """`FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS`: a comma-separated list
+    of every `key_id` that could have encrypted a row in a backup an
+    operator is about to restore from. Part of the mandatory restore
+    procedure ADR-020 section 5 requires (see `enforce_retired_keys_are_absent`)
+    -- empty/missing is the normal, non-restore case."""
+    if not env_value:
+        return frozenset()
+    return frozenset(key_id.strip() for key_id in env_value.split(",") if key_id.strip())
+
+
+RESTORE_MODE_NORMAL = "NORMAL"
+RESTORE_MODE_RESTORE = "RESTORE"
+_VALID_RESTORE_MODES = frozenset({RESTORE_MODE_NORMAL, RESTORE_MODE_RESTORE})
+
+
+def parse_restore_mode(env_value: str | None) -> str:
+    """`FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE`: an operator's explicit
+    declaration of whether this process is starting against a database
+    just restored from backup. `NORMAL` (missing/empty also default to
+    this) is ordinary operation; `RESTORE` additionally requires a
+    non-empty `FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS` manifest (see
+    `enforce_retired_keys_are_absent`) -- declaring a restore without
+    naming any key to retire would otherwise be a no-op bypass of the
+    whole procedure. Any other value fails loudly at construction, rather
+    than silently defaulting to `NORMAL` on a typo."""
+    if not env_value:
+        return RESTORE_MODE_NORMAL
+    normalized = env_value.strip().upper()
+    if normalized not in _VALID_RESTORE_MODES:
+        raise ExecutionStorageConfigurationError(
+            f"FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE={env_value!r} is not a "
+            f"recognized restore mode (expected one of {sorted(_VALID_RESTORE_MODES)!r})"
+        )
+    return normalized
+
+
+def enforce_retired_keys_are_absent(
+    keyring: ExecutionStorageKeyring,
+    retired_key_ids: frozenset[str],
+    restore_mode: str = RESTORE_MODE_NORMAL,
+) -> None:
+    """Mechanical enforcement of ADR-020 section 5's mandatory restore
+    procedure: the one piece of state that survives a full-database
+    restore unchanged is the execution-storage keyring itself (environment
+    configuration, not a database table) -- `claim_due_job` already relies
+    on a retired key_id's genuine absence from the keyring to terminalize a
+    revived row instead of decrypting it (`storage.postgres.backend`,
+    P1 of the 2026-10-14 ADR-020 closure review). That only protects a
+    restore if the operator actually removes the key; nothing previously
+    stopped a process from starting against a restored database with the
+    key still configured, or from declaring `RESTORE_MODE=RESTORE` without
+    actually naming anything to retire.
+
+    Call this at every process composition root (`api/bootstrap.py`,
+    `worker/bootstrap.py`, `worker/expiry_cleanup_bootstrap.py`) before
+    constructing a storage backend or serving any request, with
+    `restore_mode` already validated by `parse_restore_mode`:
+
+    - `RESTORE_MODE_RESTORE` with an empty `retired_key_ids` refuses to
+      start outright -- an operator declaring a restore must name every
+      key_id that could have encrypted a row in the restored backup, not
+      merely assert that a restore happened.
+    - Any `retired_key_ids` still present in the live keyring refuses to
+      start, regardless of `restore_mode` -- this is the actual
+      enforcement mechanism and must not be gameable by omitting the
+      restore-mode declaration.
+    - `RESTORE_MODE_NORMAL` with no `retired_key_ids` declared is always a
+      no-op: ordinary, non-restore startup is unaffected.
+    """
+    if restore_mode == RESTORE_MODE_RESTORE and not retired_key_ids:
+        raise ExecutionStorageConfigurationError(
+            "FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE=RESTORE requires a non-empty "
+            "FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS manifest -- an operator "
+            "declaring a restore must name every key_id that could have encrypted "
+            "a row in the restored backup, not merely assert that a restore happened"
+        )
+    still_present = retired_key_ids & keyring.key_ids()
+    if still_present:
+        raise ExecutionStorageConfigurationError(
+            "execution-storage keyring still contains key_id(s) marked for "
+            f"mandatory post-restore retirement: {sorted(still_present)!r}. ADR-020 "
+            "section 5's restore procedure requires every key_id that could have "
+            "encrypted a row in the restored backup to be removed from "
+            "FACTLAMA_EXECUTION_STORAGE_KEYS before any API/worker process touches "
+            "the restored database -- refusing to start rather than risk reviving a "
+            "destroyed input."
+        )

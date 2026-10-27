@@ -9,14 +9,19 @@ lifespan.
 """
 
 import asyncio
+import base64
+import json
 from datetime import timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 from testcontainers.community.postgres import PostgresContainer
 
+from core.execution_storage import ExecutionStorageConfigurationError
 from storage.postgres.backend import PostgresStorageBackend
 from tests.conformance.conftest import (
+    TEST_EXECUTION_STORAGE_KEY,
+    TEST_EXECUTION_STORAGE_KEY_ID,
     default_deadline,
     make_outbox_event,
     make_request,
@@ -46,6 +51,93 @@ async def test_run_starts_and_keeps_running_until_cancelled(
         # out (rather than raising some other error, e.g. a
         # StorageConfigurationError or a failed readiness check) is the
         # proof that startup succeeded and both loops are polling.
+        await asyncio.wait_for(run(), timeout=0.5)
+
+
+async def test_run_refuses_to_start_when_a_declared_retired_key_is_still_configured(
+    postgres_container: PostgresContainer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-020 section 5's mandatory restore procedure, enforced
+    mechanically: a worker must refuse to start -- never mind claim a job
+    -- against a restored database while a key_id it has been told is
+    retired is still present in its own configured keyring. Unlike
+    `test_run_starts_and_keeps_running_until_cancelled` above, this must
+    raise immediately rather than time out, proving the gate fires before
+    the poll loop ever starts."""
+    monkeypatch.setenv("FACTLAMA_DATABASE_URL", _asyncpg_url(postgres_container))
+    monkeypatch.setenv(
+        "FACTLAMA_EXECUTION_STORAGE_KEYS",
+        json.dumps(
+            {TEST_EXECUTION_STORAGE_KEY_ID: base64.b64encode(TEST_EXECUTION_STORAGE_KEY).decode()}
+        ),
+    )
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_ACTIVE_KEY_ID", TEST_EXECUTION_STORAGE_KEY_ID)
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE", "RESTORE")
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS", TEST_EXECUTION_STORAGE_KEY_ID)
+
+    with pytest.raises(ExecutionStorageConfigurationError, match=TEST_EXECUTION_STORAGE_KEY_ID):
+        await asyncio.wait_for(run(), timeout=0.5)
+
+
+async def test_run_refuses_to_start_when_restore_mode_has_an_empty_manifest(
+    postgres_container: PostgresContainer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declaring `RESTORE_MODE=RESTORE` without naming any key to retire
+    must not be a no-op way to "confirm" the restore procedure without
+    doing anything."""
+    monkeypatch.setenv("FACTLAMA_DATABASE_URL", _asyncpg_url(postgres_container))
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE", "RESTORE")
+    monkeypatch.delenv("FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS", raising=False)
+
+    with pytest.raises(ExecutionStorageConfigurationError, match="RESTORE_MODE=RESTORE"):
+        await asyncio.wait_for(run(), timeout=0.5)
+
+
+async def test_run_refuses_to_start_with_an_invalid_restore_mode_value(
+    postgres_container: PostgresContainer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo in FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE must fail loudly
+    at real worker startup, not silently fall back to NORMAL."""
+    monkeypatch.setenv("FACTLAMA_DATABASE_URL", _asyncpg_url(postgres_container))
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE", "RESTOER")
+
+    with pytest.raises(ExecutionStorageConfigurationError, match="RESTOER"):
+        await asyncio.wait_for(run(), timeout=0.5)
+
+
+async def test_run_starts_successfully_once_declared_retired_keys_are_actually_removed(
+    engine: AsyncEngine,
+    postgres_container: PostgresContainer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The positive path this whole procedure exists to allow: an operator
+    declares the restore, names the key that could have encrypted a now-
+    stale row, and has actually rotated it out of the active keyring --
+    startup must succeed and the worker must keep polling."""
+    monkeypatch.setenv("FACTLAMA_DATABASE_URL", _asyncpg_url(postgres_container))
+    monkeypatch.setenv("FACTLAMA_WORKER_POLL_INTERVAL_SECONDS", "0.05")
+    monkeypatch.setenv("FACTLAMA_WORKER_OUTBOX_POLL_INTERVAL_SECONDS", "0.05")
+    monkeypatch.setenv(
+        "FACTLAMA_EXECUTION_STORAGE_KEYS",
+        json.dumps(
+            {TEST_EXECUTION_STORAGE_KEY_ID: base64.b64encode(TEST_EXECUTION_STORAGE_KEY).decode()}
+        ),
+    )
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_ACTIVE_KEY_ID", TEST_EXECUTION_STORAGE_KEY_ID)
+    monkeypatch.setenv("FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE", "RESTORE")
+    # Retiring a key_id that was never active in the first place is exactly
+    # what "actually removed it" looks like from this gate's perspective --
+    # the active keyring above only ever configured TEST_EXECUTION_STORAGE_KEY_ID.
+    monkeypatch.setenv(
+        "FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS", "some-retired-key-from-the-backup"
+    )
+
+    with pytest.raises(TimeoutError):
+        # Same proof as test_run_starts_and_keeps_running_until_cancelled:
+        # a clean, still-running worker never returns on its own.
         await asyncio.wait_for(run(), timeout=0.5)
 
 

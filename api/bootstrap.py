@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api.settings import get_settings
+from core.execution_storage import enforce_retired_keys_are_absent
 from storage.postgres.backend import PostgresStorageBackend
 from storage.postgres.engine import (
     StorageConfigurationError,
@@ -33,6 +34,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "FACTLAMA_DATABASE_URL must be set to start the API (ADR-019: PostgreSQL "
             "is a required dependency of the whole service, not only the async routes)"
         )
+    # ADR-020 section 5's mandatory restore procedure: refuse to start
+    # (never mind serve traffic) against a restored database before any
+    # key_id named in FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS is
+    # actually gone from the configured keyring. Checked before the
+    # database is even touched, since this is pure configuration.
+    enforce_retired_keys_are_absent(
+        settings.execution_storage_keyring,
+        settings.retired_execution_storage_key_ids,
+        settings.execution_storage_restore_mode,
+    )
     engine = create_storage_engine(settings.database_url)
     # ADR-019 SS3: "failed initialization must fail startup/readiness
     # explicitly; never silently fall back to another database." An

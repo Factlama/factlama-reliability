@@ -7,7 +7,11 @@ import os
 from functools import lru_cache
 
 from api.auth import TenantCredentialStore
-from core.execution_storage import ExecutionStorageKeyring
+from core.execution_storage import (
+    ExecutionStorageKeyring,
+    parse_restore_mode,
+    parse_retired_key_ids,
+)
 
 # One answer plus its supplied evidence is not expected to approach this;
 # a request this large is already pathological before any cap on claim or
@@ -55,6 +59,18 @@ class Settings:
         self.execution_storage_keyring = ExecutionStorageKeyring.from_env(
             os.environ.get("FACTLAMA_EXECUTION_STORAGE_KEYS"),
             os.environ.get("FACTLAMA_EXECUTION_STORAGE_ACTIVE_KEY_ID"),
+        )
+        # ADR-020 section 5's mandatory restore procedure, enforced
+        # mechanically at startup -- see
+        # `core.execution_storage.enforce_retired_keys_are_absent`, called
+        # from `api/bootstrap.py`. Empty/missing in normal operation.
+        self.retired_execution_storage_key_ids = parse_retired_key_ids(
+            os.environ.get("FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS")
+        )
+        # The operator's explicit restore declaration -- raises at
+        # construction (not at use time) on an unrecognized value.
+        self.execution_storage_restore_mode = parse_restore_mode(
+            os.environ.get("FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE")
         )
 
 

@@ -28,6 +28,7 @@ import contextlib
 import logging
 import signal
 
+from core.execution_storage import enforce_retired_keys_are_absent
 from storage.postgres.backend import PostgresStorageBackend
 from storage.postgres.engine import check_ready, close_engine, create_storage_engine
 from worker.expiry_cleanup import run_execution_input_expiry_loop
@@ -49,6 +50,15 @@ def _install_shutdown_handlers(stop_event: asyncio.Event) -> None:
 
 async def run() -> None:
     settings = WorkerSettings()
+    # ADR-020 section 5's mandatory restore procedure: this process also
+    # touches a possibly-restored database (it deletes/terminalizes rows),
+    # so it is gated the same way the dispatch worker and API are -- see
+    # `worker/bootstrap.py`.
+    enforce_retired_keys_are_absent(
+        settings.execution_storage_keyring,
+        settings.retired_execution_storage_key_ids,
+        settings.execution_storage_restore_mode,
+    )
     engine = create_storage_engine(settings.database_url)
     # ADR-019 SS3: fail startup explicitly rather than sweeping against a
     # database that was never reachable in the first place.

@@ -6,7 +6,11 @@ at the first poll (ADR-019 SS3's "fail startup/readiness explicitly").
 
 import os
 
-from core.execution_storage import ExecutionStorageKeyring
+from core.execution_storage import (
+    ExecutionStorageKeyring,
+    parse_restore_mode,
+    parse_retired_key_ids,
+)
 
 DEFAULT_LEASE_DURATION_SECONDS = 120.0
 """How long a claimed job's lease lasts before it is eligible for reclaim
@@ -93,6 +97,19 @@ class WorkerSettings:
         self.execution_storage_keyring = ExecutionStorageKeyring.from_env(
             os.environ.get("FACTLAMA_EXECUTION_STORAGE_KEYS"),
             os.environ.get("FACTLAMA_EXECUTION_STORAGE_ACTIVE_KEY_ID"),
+        )
+        # ADR-020 section 5's mandatory restore procedure, enforced
+        # mechanically at startup -- see
+        # `core.execution_storage.enforce_retired_keys_are_absent`, called
+        # from `worker/bootstrap.py` and `worker/expiry_cleanup_bootstrap.py`.
+        # Empty/missing in normal operation.
+        self.retired_execution_storage_key_ids = parse_retired_key_ids(
+            os.environ.get("FACTLAMA_EXECUTION_STORAGE_RETIRED_KEY_IDS")
+        )
+        # The operator's explicit restore declaration -- raises at
+        # construction (not at use time) on an unrecognized value.
+        self.execution_storage_restore_mode = parse_restore_mode(
+            os.environ.get("FACTLAMA_EXECUTION_STORAGE_RESTORE_MODE")
         )
         # G6 handoff: the base URL of Observability's internal ingress
         # (e.g. "https://observability.internal:8000"). Left unset, outbox
