@@ -25,6 +25,7 @@ import socket
 import subprocess
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 
+from storage.models import ClaimFinding, ClaimSummary
 from storage.postgres.backend import PostgresStorageBackend
 from tests.conformance.conftest import (
     default_deadline,
@@ -196,7 +198,11 @@ def _worker_settings(outbox_lease_seconds: float = 60.0) -> WorkerSettings:
 
 
 async def _commit_one(
-    backend: PostgresStorageBackend, key: str, evaluation_id: str, event_id: str
+    backend: PostgresStorageBackend,
+    key: str,
+    evaluation_id: str,
+    event_id: str,
+    claim_summary: ClaimSummary | None = None,
 ) -> None:
     tenant = make_tenant()
     await backend.submit_or_get_job(
@@ -213,7 +219,7 @@ async def _commit_one(
         claimed.job_id,
         claimed.fencing_token,
         make_result(evaluation_id),
-        make_outbox_event(event_id, evaluation_id),
+        replace(make_outbox_event(event_id, evaluation_id), claim_summary=claim_summary),
     )
 
 
@@ -328,3 +334,168 @@ async def test_unreachable_ingress_leaves_the_event_claimable_for_retry(
 
     remaining = await backend.claim_outbox_batch("checker", timedelta(minutes=1), limit=10)
     assert [e.event_id for e in remaining] == ["cross-event-3"]
+
+
+async def _fetch_claim_rows(database_url: str, tenant_id: str, evaluation_id: str) -> list[Any]:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT claim_id, status, rationale_code FROM evaluation_claims "
+                    "WHERE tenant_id = :tenant_id AND evaluation_id = :evaluation_id "
+                    "ORDER BY claim_id"
+                ),
+                {"tenant_id": tenant_id, "evaluation_id": evaluation_id},
+            )
+            return list(result.all())
+    finally:
+        await engine.dispose()
+
+
+async def _fetch_claim_total(database_url: str, tenant_id: str, event_id: str) -> Any:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT claim_total_count FROM reliability_events "
+                    "WHERE tenant_id = :tenant_id AND event_id = :event_id"
+                ),
+                {"tenant_id": tenant_id, "event_id": event_id},
+            )
+            row = result.first()
+            return None if row is None else row.claim_total_count
+    finally:
+        await engine.dispose()
+
+
+async def test_claim_summary_crosses_the_repo_boundary_without_raw_content(
+    backend: PostgresStorageBackend,
+    observability_service: str,
+    observability_database_url: str,
+) -> None:
+    """ADR-022 acceptance evidence 7: "a real cross-repository test proves
+    an evaluation with multiple claim statuses reaches the dashboard
+    without raw content."
+
+    This is the one test neither repo's own suite can produce: Reliability
+    serializes the projection, Observability's *real* ingress parses it,
+    and the assertion reads Observability's own database directly. A
+    rename or type change on either side fails here, not in production.
+    """
+    summary = ClaimSummary(
+        total_claim_count=4,
+        findings={
+            "c1": ClaimFinding(status="SUPPORTED", rationale_code="DIRECT_SUPPORT"),
+            "c2": ClaimFinding(status="UNSUPPORTED", rationale_code="NO_SUPPORT"),
+            "c3": ClaimFinding(status="CONTRADICTED", rationale_code="CONTRADICTION_DETECTED"),
+        },
+    )
+    await _commit_one(
+        backend, "cross-key-claims", "cross-eval-claims", "cross-event-claims", summary
+    )
+    batch = await backend.claim_outbox_batch("claims-worker", timedelta(minutes=5), limit=10)
+    event = next(e for e in batch if e.event_id == "cross-event-claims")
+    # The projection survived the outbox round-trip (stored as JSON, read
+    # back) before delivery -- not merely built in memory by this test.
+    assert event.claim_summary is not None
+    assert len(event.claim_summary.findings) == 3
+
+    async with httpx.AsyncClient(base_url=observability_service, timeout=10.0) as client:
+        deliver = build_http_deliver(client, _worker_settings())
+        assert await deliver(event) is True
+    await backend.ack_outbox("cross-event-claims", "claims-worker")
+
+    rows = await _fetch_claim_rows(observability_database_url, "tenant-a", "cross-eval-claims")
+    assert [(r.claim_id, r.status, r.rationale_code) for r in rows] == [
+        ("c1", "SUPPORTED", "DIRECT_SUPPORT"),
+        ("c2", "UNSUPPORTED", "NO_SUPPORT"),
+        ("c3", "CONTRADICTED", "CONTRADICTION_DETECTED"),
+    ]
+    # The fourth claim produced no projectable finding, but its existence
+    # is preserved in the total -- so "3 findings of 4 claims" is
+    # recoverable rather than the claim silently vanishing.
+    assert (
+        await _fetch_claim_total(observability_database_url, "tenant-a", "cross-event-claims") == 4
+    )
+
+    # Privacy: Observability's claim table has no column that could hold
+    # claim text, and the delivered body carried none.
+    engine = create_async_engine(observability_database_url)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'evaluation_claims'"
+                )
+            )
+            names = {row.column_name for row in columns.all()}
+    finally:
+        await engine.dispose()
+    assert names == {
+        "tenant_id",
+        "evaluation_id",
+        "claim_id",
+        "project_id",
+        "application_id",
+        "status",
+        "rationale_code",
+        "received_at",
+    }
+
+
+async def test_redelivered_claim_summary_is_idempotent_across_the_boundary(
+    backend: PostgresStorageBackend,
+    observability_service: str,
+    observability_database_url: str,
+) -> None:
+    """At-least-once delivery really does redeliver; ADR-022 requires that
+    to stay idempotent rather than duplicating or conflicting."""
+    summary = ClaimSummary(
+        total_claim_count=1,
+        findings={"c1": ClaimFinding(status="SUPPORTED", rationale_code="DIRECT_SUPPORT")},
+    )
+    await _commit_one(
+        backend, "cross-key-claims-dup", "cross-eval-claims-dup", "cross-event-claims-dup", summary
+    )
+    batch = await backend.claim_outbox_batch("claims-dup-worker", timedelta(minutes=5), limit=10)
+    event = next(e for e in batch if e.event_id == "cross-event-claims-dup")
+
+    async with httpx.AsyncClient(base_url=observability_service, timeout=10.0) as client:
+        deliver = build_http_deliver(client, _worker_settings())
+        assert await deliver(event) is True
+        assert await deliver(event) is True
+
+    rows = await _fetch_claim_rows(observability_database_url, "tenant-a", "cross-eval-claims-dup")
+    assert len(rows) == 1
+
+
+async def test_a_producer_sending_no_claim_summary_is_still_accepted(
+    backend: PostgresStorageBackend,
+    observability_service: str,
+    observability_database_url: str,
+) -> None:
+    """Backward compatibility, the other half of ADR-022's additive
+    promise: an event with no projection must still be accepted, and must
+    record NULL (unavailable) rather than 0."""
+    await _commit_one(
+        backend, "cross-key-no-claims", "cross-eval-no-claims", "cross-event-no-claims"
+    )
+    batch = await backend.claim_outbox_batch("no-claims-worker", timedelta(minutes=5), limit=10)
+    event = next(e for e in batch if e.event_id == "cross-event-no-claims")
+    assert event.claim_summary is None
+
+    async with httpx.AsyncClient(base_url=observability_service, timeout=10.0) as client:
+        deliver = build_http_deliver(client, _worker_settings())
+        assert await deliver(event) is True
+
+    assert (
+        await _fetch_claim_total(observability_database_url, "tenant-a", "cross-event-no-claims")
+        is None
+    )
+    assert (
+        await _fetch_claim_rows(observability_database_url, "tenant-a", "cross-eval-no-claims")
+        == []
+    )

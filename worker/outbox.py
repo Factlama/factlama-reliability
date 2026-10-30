@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timezone
 
 from schemas.verification import AttemptOutcome, VerificationResult
-from storage.models import OutboxEvent
+from storage.models import CLAIM_FINDING_STATUSES, ClaimFinding, ClaimSummary, OutboxEvent
 
 _NONE_CALIBRATION_CLASS = "NONE"
 _MIXED = "MIXED"
@@ -53,6 +53,34 @@ def _qualification_status(result: VerificationResult) -> str:
     return _MIXED
 
 
+def _claim_summary(result: VerificationResult) -> ClaimSummary:
+    """ADR-022: derive the non-content claim projection.
+
+    Carries only each claim's `claim_id`, normalized finding status and
+    bounded `rationale_code` -- never `ClaimVerification.text` (even when
+    `text_status == AVAILABLE`), never its free-form `rationale`, never
+    `evidence_ids`. Evidence IDs are deliberately excluded too: they are
+    references rather than bodies, but ADR-022's projection does not list
+    them and the wire schema's `additionalProperties: false` would reject
+    them anyway.
+
+    A claim whose verdict is not one of ADR-022's four finding statuses
+    (`NOT_APPLICABLE`, or `DISPUTED`, which this pipeline cannot produce
+    at claim level today -- see `schemas.claims.ClaimVerdict`) is omitted
+    from `findings` but still counted in `total_claim_count`, so the
+    consumer can always derive how many claims produced no finding. This
+    is why `total_claim_count` is the length of `result.claims`, not of
+    `findings`."""
+    findings: dict[str, ClaimFinding] = {}
+    for claim in result.claims:
+        if claim.verdict.value not in CLAIM_FINDING_STATUSES:
+            continue
+        findings[claim.claim_id] = ClaimFinding(
+            status=claim.verdict.value, rationale_code=claim.rationale_code.value
+        )
+    return ClaimSummary(total_claim_count=len(result.claims), findings=findings)
+
+
 def build_outbox_event(result: VerificationResult) -> OutboxEvent:
     calibration_class, calibration_classes = _calibration_fields(result)
     return OutboxEvent(
@@ -73,4 +101,5 @@ def build_outbox_event(result: VerificationResult) -> OutboxEvent:
         trace_id=result.trace_id,
         span_id=result.span_id,
         calibration_classes=calibration_classes,
+        claim_summary=_claim_summary(result),
     )

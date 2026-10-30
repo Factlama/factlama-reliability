@@ -50,7 +50,7 @@ from storage.errors import (
     JobNotFound,
     LeaseExpired,
 )
-from storage.models import ClaimedJob, Job, JobState, OutboxEvent
+from storage.models import ClaimedJob, ClaimSummary, Job, JobState, OutboxEvent, to_wire_timestamp
 from storage.postgres.tables import (
     evaluations,
     execution_input_tombstones,
@@ -76,20 +76,31 @@ def _outbox_event_to_dict(event: OutboxEvent) -> dict[str, Any]:
         "event_id": event.event_id,
         "tenant_id": event.tenant_id,
         "evaluation_id": event.evaluation_id,
-        "occurred_at": event.occurred_at.isoformat(),
+        "occurred_at": to_wire_timestamp(event.occurred_at),
         "status": event.status,
         "verdict": event.verdict,
-        "scores": {name: score.model_dump(mode="json") for name, score in event.scores.items()},
+        # See `event_to_reliability_event_json`'s own note: this dict is
+        # kept field-for-field identical to the delivered wire body, so
+        # the same `exclude_none`/Z-suffix contract rules apply here.
+        "scores": {
+            name: score.model_dump(mode="json", exclude_none=True)
+            for name, score in event.scores.items()
+        },
         "evaluator_version": event.evaluator_version,
         "calibration_class": event.calibration_class,
         "qualification_status": event.qualification_status,
-        "usage_summary": event.usage_summary.model_dump(mode="json"),
+        "usage_summary": event.usage_summary.model_dump(mode="json", exclude_none=True),
         "project_id": event.project_id,
         "application_id": event.application_id,
         "interaction_id": event.interaction_id,
         "trace_id": event.trace_id,
         "span_id": event.span_id,
         "calibration_classes": list(event.calibration_classes),
+        # ADR-022; see `event_to_reliability_event_json`'s own note on why
+        # an absent projection is an omitted key, not a null.
+        "claim_summary": (
+            event.claim_summary.to_wire_json() if event.claim_summary is not None else None
+        ),
     }
     return {k: v for k, v in payload.items() if v is not None}
 
@@ -1093,4 +1104,14 @@ def _dict_to_outbox_event(payload: dict[str, Any]) -> OutboxEvent:
         trace_id=payload.get("trace_id"),
         span_id=payload.get("span_id"),
         calibration_classes=list(payload.get("calibration_classes", [])),
+        # ADR-022: absent key -> None -> "unavailable" downstream, which is
+        # exactly how a pre-ADR-022 payload already sitting in the outbox
+        # must be read. Without this line the projection would be dropped
+        # on the real delivery path, since that path stores the payload and
+        # reads it back before delivering.
+        claim_summary=(
+            ClaimSummary.from_wire_json(payload["claim_summary"])
+            if payload.get("claim_summary") is not None
+            else None
+        ),
     )

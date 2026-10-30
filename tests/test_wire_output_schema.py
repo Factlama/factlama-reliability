@@ -30,6 +30,8 @@ from core.verifier import Verifier
 from judges.providers import MockModelProvider
 from schemas.tenancy import TenantContext
 from schemas.verification import VerificationResult
+from worker.outbox import build_outbox_event
+from worker.outbox_http_delivery import event_to_reliability_event_json
 
 
 def _contracts_dir() -> Path | None:
@@ -70,7 +72,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _verification_result_validator() -> Draft202012Validator:
+def _validator_for(schema_filename: str) -> Draft202012Validator:
     schema_dir = CONTRACTS_DIR / "schemas"
     resources = []
     for schema_path in schema_dir.glob("*.schema.json"):
@@ -78,8 +80,16 @@ def _verification_result_validator() -> Draft202012Validator:
         resource = Resource.from_contents(contents, default_specification=DRAFT202012)
         resources.append((resource.id(), resource))
     registry = Registry().with_resources(resources)
-    schema = json.loads((schema_dir / "verification_result.schema.json").read_text())
+    schema = json.loads((schema_dir / schema_filename).read_text())
     return Draft202012Validator(schema, registry=registry)
+
+
+def _verification_result_validator() -> Draft202012Validator:
+    return _validator_for("verification_result.schema.json")
+
+
+def _reliability_event_validator() -> Draft202012Validator:
+    return _validator_for("reliability_event.schema.json")
 
 
 def _assert_valid(validator: Draft202012Validator, instance: dict[str, Any]) -> None:
@@ -117,6 +127,49 @@ def test_at_least_one_fixture_was_actually_found() -> None:
     if CONTRACTS_DIR is None:
         pytest.skip("contracts/v0.1 not found")
     assert _result_fixtures()
+
+
+class TestReliabilityEventOutputValidates:
+    """ADR-022: the same producer-output-not-just-parser rule F1 established
+    for `VerificationResult`, now applied to the `ReliabilityEvent` this
+    repo's outbox actually emits -- including the new `claim_summary`
+    projection, whose `ClaimFinding` is the one object in contracts/v0.1
+    with `additionalProperties: false`. A producer that ever started
+    attaching claim text or free-form rationale would fail here rather
+    than silently publishing content to Observability.
+    """
+
+    @pytest.mark.parametrize("path", _result_fixtures(), ids=lambda p: p.stem)
+    def test_outbox_event_json_validates_for_every_canonical_result(self, path: Path) -> None:
+        validator = _reliability_event_validator()
+        result = VerificationResult(**json.loads(path.read_text()))
+        event = build_outbox_event(result)
+        _assert_valid(validator, event_to_reliability_event_json(event))
+
+    def test_emitted_claim_summary_carries_findings_and_no_content(self) -> None:
+        """The canonical PARTIAL fixture has a supported and an unsupported
+        claim, both with claim text -- so this proves the real projection is
+        populated (not merely schema-valid by being empty) while the text
+        itself never crosses the boundary."""
+        validator = _reliability_event_validator()
+        partial = next((p for p in _result_fixtures() if p.stem == "partial"), None)
+        assert partial is not None, "expected a canonical 'partial' verification_result fixture"
+        source = json.loads(partial.read_text())
+        result = VerificationResult(**source)
+        body = event_to_reliability_event_json(build_outbox_event(result))
+        _assert_valid(validator, body)
+
+        summary = body["claim_summary"]
+        assert summary["total_claim_count"] == len(result.claims)
+        assert summary["findings"], "expected at least one projected finding"
+        for finding in summary["findings"].values():
+            assert set(finding) <= {"status", "rationale_code"}
+
+        # No claim's own text from the fixture appears anywhere in the body.
+        serialized = json.dumps(body)
+        for claim in result.claims:
+            if claim.text:
+                assert claim.text not in serialized
 
 
 class TestLiveApiResponseValidates:

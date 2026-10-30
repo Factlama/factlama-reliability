@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from storage.models import OutboxEvent
+from storage.models import OutboxEvent, to_wire_timestamp
 from worker.outbox_delivery import DeliverFn
 from worker.settings import WorkerSettings
 
@@ -46,20 +46,37 @@ def event_to_reliability_event_json(event: OutboxEvent) -> dict[str, Any]:
         "event_id": event.event_id,
         "tenant_id": event.tenant_id,
         "evaluation_id": event.evaluation_id,
-        "occurred_at": event.occurred_at.isoformat(),
+        "occurred_at": to_wire_timestamp(event.occurred_at),
         "status": event.status,
         "verdict": event.verdict,
-        "scores": {name: score.model_dump(mode="json") for name, score in event.scores.items()},
+        # `exclude_none` throughout: CONTRACTS.md -- "null means known
+        # absent; omitted means not supplied" -- and contracts/v0.1 types
+        # these optional leaves as number/string, not nullable, so an
+        # explicit `null` is a schema violation. Same class of bug F1 of
+        # the 2026-09-21 report found in `VerificationResult`'s own
+        # serializer; found here 2026-10-29 by this repo's new
+        # `ReliabilityEvent` producer-output schema suite.
+        "scores": {
+            name: score.model_dump(mode="json", exclude_none=True)
+            for name, score in event.scores.items()
+        },
         "evaluator_version": event.evaluator_version,
         "calibration_class": event.calibration_class,
         "qualification_status": event.qualification_status,
-        "usage_summary": event.usage_summary.model_dump(mode="json"),
+        "usage_summary": event.usage_summary.model_dump(mode="json", exclude_none=True),
         "project_id": event.project_id,
         "application_id": event.application_id,
         "interaction_id": event.interaction_id,
         "trace_id": event.trace_id,
         "span_id": event.span_id,
         "calibration_classes": list(event.calibration_classes),
+        # ADR-022: omitted entirely when this event carries no projection
+        # (the `is not None` filter below) -- an omitted key is exactly
+        # how the contract spells "claim data unavailable", which a
+        # consumer must not read as zero findings.
+        "claim_summary": (
+            event.claim_summary.to_wire_json() if event.claim_summary is not None else None
+        ),
     }
     return {k: v for k, v in payload.items() if v is not None}
 
