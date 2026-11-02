@@ -19,6 +19,7 @@ from core import provider_identity
 from core.budgets import check_request_budget
 from core.compliance import is_provider_compliant
 from core.governance import apply_capture_mode, governed_request_payload
+from core.routing_profiles import routing_profile_for
 from core.verifier import Verifier
 from judges.port import JudgeErrorCode
 from schemas.claims import ClaimVerification
@@ -97,7 +98,13 @@ async def process_claimed_job(
             else verifier.claim_extractor.extract(request.answer)
         )
 
-        budget_violation = check_request_budget(len(claims), len(request.evidence))
+        routing_profile = routing_profile_for(request.mode)
+        budget_violation = check_request_budget(
+            len(claims),
+            len(request.evidence),
+            max_claims=routing_profile.max_claims,
+            max_evidence=routing_profile.max_evidence_per_claim,
+        )
         if budget_violation is not None:
             logger.warning("Job %s abstained before dispatch: %s", claimed.job_id, budget_violation)
             result = verifier.abstained_result(

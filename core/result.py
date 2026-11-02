@@ -4,7 +4,7 @@ import uuid
 from typing import Any
 
 from schemas.claims import ClaimVerification
-from schemas.policy import PolicyAction
+from schemas.policy import PolicyAction, PolicyDecision
 from schemas.verification import (
     AbstentionReason,
     DisputeReason,
@@ -55,6 +55,7 @@ class VerificationResultBuilder:
         self.violations: list[Violation] = []
         self.policy_action: str | None = None
         self.policy_version: str | None = None
+        self.policy_decision: PolicyDecision | None = None
         self.provenance: Provenance | None = None
         self.usage_summary: Usage = Usage()
         self.metadata: dict[str, Any] = {}
@@ -109,6 +110,10 @@ class VerificationResultBuilder:
         self.policy_version = policy_version
         return self
 
+    def with_policy_decision(self, decision: PolicyDecision | None) -> "VerificationResultBuilder":
+        self.policy_decision = decision
+        return self
+
     def with_provenance(self, provenance: Provenance) -> "VerificationResultBuilder":
         self.provenance = provenance
         return self
@@ -145,6 +150,7 @@ class VerificationResultBuilder:
             violations=self.violations,
             policy_action=self.policy_action,
             policy_version=self.policy_version,
+            policy_decision=self.policy_decision,
             provenance=self.provenance,
             usage_summary=self.usage_summary,
             metadata=self.metadata,

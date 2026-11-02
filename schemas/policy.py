@@ -1,5 +1,6 @@
 """Policy schema models."""
 
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -17,6 +18,54 @@ class PolicyAction(str, Enum):
     ASK_USER = "ASK_USER"
     BLOCK = "BLOCK"
     HUMAN_REVIEW = "HUMAN_REVIEW"
+
+
+class PolicyDecisionMode(str, Enum):
+    """ADR-023: whether a policy decision is advisory (recorded, not
+    enforced -- every current call site) or enforced (would have blocked
+    the answer at a real customer integration point). `ENFORCED` is
+    reserved vocabulary with no producer yet, the same pattern this
+    contract already uses for `DISPUTED`/`JUDGE_DISAGREEMENT` at G0.
+    """
+
+    ADVISORY = "ADVISORY"
+    ENFORCED = "ENFORCED"
+
+
+class PolicyDecision(BaseModel):
+    """ADR-023's decision-provenance record: `policy-engine.md`'s "each
+    decision records policy_id, version, matched rule ID, inputs used,
+    action, timestamp and whether it is advisory or enforced." Additive
+    alongside the pre-existing flat `VerificationResult.policy_action`/
+    `policy_version` fields, which remain unchanged for backward
+    compatibility.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    policy_id: str = Field(
+        ...,
+        description="The policy actually evaluated against (never null -- "
+        "PolicyEngine always resolves some policy, 'default' included)",
+    )
+    policy_version: str = Field(..., description="Version of the policy actually evaluated against")
+    matched_rule_id: str = Field(
+        ..., description="Stable identifier for which PolicyEngine code path produced `action`"
+    )
+    action: PolicyAction = Field(..., description="The policy action this decision selected")
+    inputs_used: list[str] = Field(
+        ...,
+        description=(
+            "Sorted, deduplicated bounded tokens the engine actually inspected: "
+            "VERDICT, SCORE:<dimension>, CITATIONS_PRESENT, VIOLATION:<code>. "
+            "Identifiers and booleans only -- never score values, messages, or content."
+        ),
+    )
+    decided_at: datetime = Field(..., description="When PolicyEngine returned this decision")
+    mode: PolicyDecisionMode = Field(
+        default=PolicyDecisionMode.ADVISORY,
+        description="ADVISORY (every current producer) or ENFORCED (reserved, unproduced)",
+    )
 
 
 class CaptureMode(str, Enum):
@@ -176,6 +225,16 @@ class ActionPolicy(BaseModel):
     on_abstain: PolicyAction = Field(
         default=PolicyAction.HUMAN_REVIEW, description="Action when abstaining"
     )
+    escalate_risk_tiers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "EPIC-08 risk/cost routing: tenant-named risk-tier values (e.g. "
+            "'HIGH') that force at least HUMAN_REVIEW even when the verdict-"
+            "to-action mapping would otherwise select PASS. Never downgrades "
+            "a stricter action a tenant's own on_failure/on_partial/on_abstain "
+            "config already selected."
+        ),
+    )
 
 
 class Policy(BaseModel):
@@ -204,6 +263,15 @@ class Policy(BaseModel):
     )
     capture: CapturePolicy = Field(default_factory=CapturePolicy)
     execution_storage: ExecutionStoragePolicy = Field(default_factory=ExecutionStoragePolicy)
+    risk_tier: str | None = Field(
+        None,
+        description=(
+            "EPIC-08 risk/cost routing: a tenant-assigned risk classification "
+            "for this evaluation (e.g. 'HIGH'), free-form and tenant-defined. "
+            "Compared against actions.escalate_risk_tiers to decide whether "
+            "this decision must be escalated beyond PASS."
+        ),
+    )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional policy metadata")
 
     def to_dict(self) -> dict[str, Any]:

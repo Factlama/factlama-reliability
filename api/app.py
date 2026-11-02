@@ -33,6 +33,7 @@ from starlette.concurrency import run_in_threadpool
 from api.bootstrap import check_storage_ready, lifespan
 from api.errors import ApiError, ApiErrorCode
 from api.settings import Settings, get_settings
+from core.routing_profiles import effective_job_deadline_seconds
 from core.verifier import Verifier, get_default_verifier
 from schemas.policy import ExecutionStorageMode, resolve_effective_execution_storage_mode
 from schemas.tenancy import TenantContext
@@ -326,7 +327,16 @@ async def create_verification_job(
     _authorize_request_scope(tenant_context, verification_request)
     _reject_if_execution_storage_not_authorized(tenant_context, verification_request)
 
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=settings.job_deadline_seconds)
+    # EPIC-03/G9 independent review, 2026-11-01: the async path's own
+    # overall deadline must also reflect the request's routing profile,
+    # not only the flat operational ceiling -- a FAST job must not get
+    # DEEP's deadline just because it went through the durable job API
+    # instead of the sync one.
+    deadline = datetime.now(timezone.utc) + timedelta(
+        seconds=effective_job_deadline_seconds(
+            settings.job_deadline_seconds, verification_request.mode
+        )
+    )
     try:
         job = await storage_backend.submit_or_get_job(
             tenant_context,

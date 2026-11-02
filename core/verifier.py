@@ -19,6 +19,7 @@ from core.compliance import is_provider_compliant
 from core.evidence import EvidenceMapper, SimpleEvidenceMapper
 from core.policy import PolicyEngine
 from core.result import VerificationResultBuilder
+from core.routing_profiles import routing_profile_for
 from core.scoring import ScoringEngine, derive_calibration_class, determine_status
 from judges.port import (
     CancellationToken,
@@ -42,7 +43,7 @@ from schemas.claims import (
 )
 from schemas.evidence import Evidence
 from schemas.instruction import Instruction, Priority
-from schemas.policy import Policy
+from schemas.policy import Policy, PolicyDecision, PolicyDecisionMode
 from schemas.tools import ToolExecution, ToolStatus
 from schemas.verification import (
     AbstentionReason,
@@ -161,12 +162,18 @@ class Verifier:
 
         try:
             policy = request.policy or Policy(id="default")
+            routing_profile = routing_profile_for(request.mode)
 
             claims = (
                 list(request.claims) if request.claims else self._extract_claims(request.answer)
             )
 
-            budget_violation = check_request_budget(len(claims), len(request.evidence))
+            budget_violation = check_request_budget(
+                len(claims),
+                len(request.evidence),
+                max_claims=routing_profile.max_claims,
+                max_evidence=routing_profile.max_evidence_per_claim,
+            )
             if budget_violation is not None:
                 logger.warning(
                     "Request %s abstained before dispatch: %s",
@@ -215,6 +222,7 @@ class Verifier:
             ) = self.dispatch_claims(
                 claims,
                 request.evidence,
+                overall_deadline=time.monotonic() + routing_profile.request_deadline_seconds,
             )
             if usage_budget_violation is not None:
                 logger.warning(
@@ -286,7 +294,7 @@ class Verifier:
                 evaluator_version=EVALUATOR_VERSION,
                 policy_version=None,
                 mode=request.mode,
-                routing_profile_version=f"{request.mode.value.lower()}-0.1",
+                routing_profile_version=routing_profile.version,
                 started_at=started_at,
                 completed_at=completed_at,
                 attempts=all_attempts,
@@ -346,6 +354,7 @@ class Verifier:
         builder.with_trace_id(trace_id).with_span_id(span_id)
 
         policy = request.policy or Policy(id="default")
+        routing_profile = routing_profile_for(request.mode)
 
         instruction_violations = self._evaluate_instructions(request.answer, request.instructions)
         scope_violations = self._evaluate_scope(request.answer, policy)
@@ -377,16 +386,33 @@ class Verifier:
             usage_budget_exceeded=usage_budget_violation is not None,
         )
 
-        policy_action, policy_violations = self.policy_engine.evaluate(
+        policy_decision_draft = self.policy_engine.evaluate_with_decision(
             verdict=verdict,
             scores=scores,
             violations=violations,
             policy=request.policy,
             has_citations=bool(request.citations),
+            mode=request.mode,
+            application_id=request.application_id,
+        )
+        policy_action, policy_violations = (
+            policy_decision_draft.action,
+            policy_decision_draft.additional_violations,
         )
 
         if request.policy:
             builder.with_policy_version(request.policy.version)
+        builder.with_policy_decision(
+            PolicyDecision(
+                policy_id=policy.id,
+                policy_version=policy.version,
+                matched_rule_id=policy_decision_draft.matched_rule_id,
+                action=policy_decision_draft.action,
+                inputs_used=policy_decision_draft.inputs_used,
+                decided_at=datetime.now(timezone.utc),
+                mode=PolicyDecisionMode.ADVISORY,
+            )
+        )
 
         completed_at = datetime.now(timezone.utc)
         provenance = Provenance(
@@ -394,7 +420,7 @@ class Verifier:
             evaluator_version=EVALUATOR_VERSION,
             policy_version=request.policy.version if request.policy else None,
             mode=request.mode,
-            routing_profile_version=f"{request.mode.value.lower()}-0.1",
+            routing_profile_version=routing_profile.version,
             started_at=started_at,
             completed_at=completed_at,
             attempts=attempts,
@@ -502,7 +528,7 @@ class Verifier:
             evaluator_version=EVALUATOR_VERSION,
             policy_version=request.policy.version if request.policy else None,
             mode=request.mode,
-            routing_profile_version=f"{request.mode.value.lower()}-0.1",
+            routing_profile_version=routing_profile_for(request.mode).version,
             started_at=started_at,
             completed_at=completed_at,
             attempts=[attempt],
@@ -572,12 +598,19 @@ class Verifier:
             )
             for name, score in result.scores.items()
         }
-        policy_action, policy_violations = self.policy_engine.evaluate(
+        policy = request.policy or Policy(id="default")
+        policy_decision_draft = self.policy_engine.evaluate_with_decision(
             verdict=OverallVerdict.ABSTAIN,
             scores=invalidated_scores,
             violations=result.violations,
             policy=request.policy,
             has_citations=bool(request.citations),
+            mode=request.mode,
+            application_id=request.application_id,
+        )
+        policy_action, policy_violations = (
+            policy_decision_draft.action,
+            policy_decision_draft.additional_violations,
         )
         return result.model_copy(
             update={
@@ -587,6 +620,18 @@ class Verifier:
                 "dispute_reason": None,
                 "scores": invalidated_scores,
                 "policy_action": policy_action,
+                # ADR-023: a real second decision, replacing the first --
+                # `finalize()`'s own policy_decision no longer reflects what
+                # actually happened once revocation overrides it here.
+                "policy_decision": PolicyDecision(
+                    policy_id=policy.id,
+                    policy_version=policy.version,
+                    matched_rule_id=policy_decision_draft.matched_rule_id,
+                    action=policy_action,
+                    inputs_used=policy_decision_draft.inputs_used,
+                    decided_at=datetime.now(timezone.utc),
+                    mode=PolicyDecisionMode.ADVISORY,
+                ),
                 "violations": result.violations + policy_violations,
             }
         )

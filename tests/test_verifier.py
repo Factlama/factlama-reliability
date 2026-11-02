@@ -120,6 +120,12 @@ class TestVerifier:
         result = verifier.verify(request)
         assert result.policy_action is not None
         assert result.policy_version == "0.1"
+        assert result.policy_decision is not None
+        assert result.policy_decision.policy_id == "strict"
+        assert result.policy_decision.policy_version == "0.1"
+        assert result.policy_decision.action.value == result.policy_action
+        assert "VERDICT" in result.policy_decision.inputs_used
+        assert result.policy_decision.mode.value == "ADVISORY"
 
     def test_verify_result_structure(self) -> None:
         """Test that result has all expected fields."""
@@ -265,6 +271,9 @@ class TestErrorHandling:
         assert "Simulated error" not in str(result.metadata)
         assert len(result.provenance.attempts) == 1
         assert result.provenance.attempts[0].outcome.value == "FAILED"
+        # ADR-023: the internal-pipeline-failure handler never calls
+        # PolicyEngine, so it makes no decision -- no decision provenance.
+        assert result.policy_decision is None
 
 
 class _MalformedProvider(JudgeProvider):
@@ -437,6 +446,63 @@ class TestProviderIdentityInAttempts:
         attempt = result.provenance.attempts[0]
         assert attempt.model_id is None
         assert attempt.pinned_model_version is None
+
+
+class TestRiskTierEscalationEndToEnd:
+    """EPIC-08 risk/cost routing, exercised through the real `verify()`
+    pipeline rather than `PolicyEngine` directly -- proves `finalize()`
+    actually threads `request.mode`/`risk_tier` all the way through."""
+
+    def test_verify_escalates_a_high_risk_tier_pass_to_human_review(self) -> None:
+        from schemas.policy import ActionPolicy
+        from schemas.verification import VerificationMode
+
+        policy = Policy(
+            id="strict",
+            actions=ActionPolicy(escalate_risk_tiers=["HIGH"]),
+            risk_tier="HIGH",
+        )
+        request = _request(
+            answer="Company X was founded in 2018.",
+            evidence=[Evidence(evidence_id="doc_001", content="Company X was founded in 2018.")],
+            policy=policy,
+            mode=VerificationMode.DEEP,
+        )
+        result = Verifier(model_provider=MockModelProvider()).verify(request)
+
+        assert result.policy_decision is not None
+        assert result.policy_decision.matched_rule_id == "RISK_TIER_ESCALATES_TO_HUMAN_REVIEW"
+        assert result.policy_decision.action == PolicyAction.HUMAN_REVIEW
+        assert "MODE:DEEP" in result.policy_decision.inputs_used
+        assert "APPLICATION_PRESENT" in result.policy_decision.inputs_used
+        assert "RISK_TIER:HIGH" in result.policy_decision.inputs_used
+
+
+class TestPolicyDecisionOverrideProvenance:
+    """ADR-023: `override_with_post_dispatch_abstention()` makes a real
+    second decision, replacing `finalize()`'s first one -- it must produce
+    a fresh `policy_decision`, not merely overwrite the flat `policy_action`."""
+
+    def test_override_replaces_policy_decision_with_a_new_one(self) -> None:
+        from schemas.verification import AbstentionReason
+
+        verifier = Verifier()
+        request = _request(
+            evidence=[Evidence(evidence_id="doc_001", content="Answer.")],
+        )
+        original = verifier.verify(request)
+        assert original.policy_decision is not None
+        original_decided_at = original.policy_decision.decided_at
+
+        overridden = verifier.override_with_post_dispatch_abstention(
+            original, reason=AbstentionReason.REVOKED, request=request
+        )
+
+        assert overridden.policy_decision is not None
+        assert overridden.policy_decision.action == PolicyAction.HUMAN_REVIEW
+        assert overridden.policy_decision.matched_rule_id == "ACTIONS_ON_ABSTAIN"
+        assert overridden.policy_decision.decided_at >= original_decided_at
+        assert overridden.policy_action == PolicyAction.HUMAN_REVIEW.value
 
 
 class TestPolicyReferenceRejection:

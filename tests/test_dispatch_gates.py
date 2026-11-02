@@ -4,6 +4,7 @@ reaches a judge -- plus the evidence-injection defense-in-depth signal and
 explicit-claims mode.
 """
 
+import dataclasses
 import time
 
 import pytest
@@ -21,6 +22,7 @@ from core.budgets import (
     summarize_usage,
 )
 from core.compliance import is_provider_compliant
+from core.routing_profiles import routing_profile_for
 from core.verifier import Verifier
 from judges.port import (
     CancellationToken,
@@ -42,6 +44,7 @@ from schemas.verification import (
     QualificationStatus,
     ResultStatus,
     Usage,
+    VerificationMode,
     VerificationRequest,
 )
 
@@ -160,6 +163,7 @@ class TestVerifierBudgetGate:
         assert result.provenance.attempts[0].outcome == AttemptOutcome.FAILED
         assert result.provenance.attempts[0].error == "BUDGET_EXHAUSTED"
         assert result.claims == []
+        assert result.policy_decision is None
 
     def test_too_much_evidence_abstains_with_zero_dispatch(self) -> None:
         verifier = Verifier()
@@ -194,6 +198,58 @@ class TestVerifierBudgetGate:
 
         assert result.status == ResultStatus.COMPLETED
         assert result.abstention_reason is None
+
+
+class TestRoutingProfileCapsAreEnforcedPerMode:
+    """EPIC-03: `request.mode` must actually change the pre-dispatch
+    claim/evidence caps, not just a label -- the same claim count that
+    abstains under `FAST` must dispatch normally under `STANDARD`/`DEEP`."""
+
+    def _claims(self, count: int) -> list[Claim]:
+        return [Claim(claim_id=f"c{i}", text=f"Claim number {i}.") for i in range(count)]
+
+    def test_a_claim_count_within_standard_but_over_fast_abstains_only_under_fast(self) -> None:
+        fast_profile = routing_profile_for(VerificationMode.FAST)
+        standard_profile = routing_profile_for(VerificationMode.STANDARD)
+        claim_count = fast_profile.max_claims + 1
+        assert claim_count <= standard_profile.max_claims  # the premise this test needs
+
+        claims = self._claims(claim_count)
+        evidence = [Evidence(evidence_id="e1", content="some evidence")]
+
+        fast_verifier = Verifier(
+            claim_extractor=_FixedClaimExtractor(claims), model_provider=MockModelProvider()
+        )
+        fast_result = fast_verifier.verify(
+            VerificationRequest(
+                request_id="req_fast_over_cap",
+                project_id="p1",
+                application_id="a1",
+                answer="irrelevant, extractor is stubbed",
+                evidence=evidence,
+                mode=VerificationMode.FAST,
+            ),
+            tenant_id="t1",
+        )
+        assert fast_result.status == ResultStatus.ABSTAINED
+        assert fast_result.abstention_reason == AbstentionReason.BUDGET_EXHAUSTED
+
+        standard_verifier = Verifier(
+            claim_extractor=_FixedClaimExtractor(claims), model_provider=MockModelProvider()
+        )
+        standard_result = standard_verifier.verify(
+            VerificationRequest(
+                request_id="req_standard_within_cap",
+                project_id="p1",
+                application_id="a1",
+                answer="irrelevant, extractor is stubbed",
+                evidence=evidence,
+                mode=VerificationMode.STANDARD,
+            ),
+            tenant_id="t1",
+        )
+        assert standard_result.status == ResultStatus.COMPLETED
+        assert standard_result.abstention_reason is None
 
 
 class TestUsageBudget:
@@ -604,6 +660,98 @@ class TestVerifierOverallRequestDeadline:
         # claim could be sent, and the remaining two were never dispatched.
         assert len(result.provenance.attempts) == 1
 
+    def test_fast_modes_shorter_deadline_stops_dispatch_sooner_than_standard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """EPIC-03: the per-mode profile's `request_deadline_seconds` must
+        actually reach `dispatch_claims()`'s `overall_deadline` -- not
+        just differ as a number nobody reads. Same fake-clock technique as
+        the test above, but driven by `request.mode` through the real
+        `routing_profile_for` lookup instead of patching the legacy global
+        default directly."""
+        import core.verifier as verifier_module
+        from core.routing_profiles import RoutingProfile, routing_profile_for
+
+        real_profile_for = routing_profile_for
+
+        def tiny_fast_profile(mode: VerificationMode) -> RoutingProfile:
+            if mode == VerificationMode.FAST:
+                return dataclasses.replace(
+                    real_profile_for(VerificationMode.FAST), request_deadline_seconds=0.05
+                )
+            return real_profile_for(mode)
+
+        monkeypatch.setattr(verifier_module, "routing_profile_for", tiny_fast_profile)
+
+        clock = {"t": 0.0}
+
+        def fake_monotonic() -> float:
+            clock["t"] += 0.03
+            return clock["t"]
+
+        monkeypatch.setattr(verifier_module.time, "monotonic", fake_monotonic)
+
+        class _FastProvider(JudgeProvider):
+            @property
+            def name(self) -> str:
+                return "fast-provider"
+
+            def evaluate(
+                self, request: JudgeRequest, deadline: float, cancellation: CancellationToken
+            ) -> JudgeResult:
+                return JudgeResult(
+                    verdict=ClaimVerdict.SUPPORTED,
+                    evidence_ids=[request.evidence[0].evidence_id],
+                )
+
+            @property
+            def compliance_tags(self) -> frozenset[str]:
+                return frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"})
+
+        claims = [Claim(claim_id=f"c{i}", text="Paris is the capital of France.") for i in range(3)]
+        evidence = [Evidence(evidence_id="e1", content="Paris is the capital of France.")]
+
+        fast_verifier = Verifier(
+            claim_extractor=_FixedClaimExtractor(claims), model_provider=_FastProvider()
+        )
+        fast_result = fast_verifier.verify(
+            VerificationRequest(
+                request_id="req_fast_deadline",
+                project_id="p1",
+                application_id="a1",
+                answer="irrelevant, extractor is stubbed",
+                evidence=evidence,
+                mode=VerificationMode.FAST,
+            ),
+            tenant_id="t1",
+        )
+        fast_attempts = len(fast_result.provenance.attempts)
+
+        clock["t"] = 0.0  # reset for a clean second run
+        standard_verifier = Verifier(
+            claim_extractor=_FixedClaimExtractor(claims), model_provider=_FastProvider()
+        )
+        standard_result = standard_verifier.verify(
+            VerificationRequest(
+                request_id="req_standard_deadline",
+                project_id="p1",
+                application_id="a1",
+                answer="irrelevant, extractor is stubbed",
+                evidence=evidence,
+                mode=VerificationMode.STANDARD,
+            ),
+            tenant_id="t1",
+        )
+        # STANDARD's own (unpatched, real) 60s deadline is nowhere close
+        # to exhausted by a few fake-clock ticks -- all three claims
+        # dispatch. The exact attempt count FAST's tiny patched deadline
+        # allows depends on how many `time.monotonic()` reads happen
+        # before the dispatch loop's first check -- an internal detail
+        # this test should not couple to exactly -- so it asserts the
+        # relative difference the mode actually caused, not a pinned count.
+        assert len(standard_result.provenance.attempts) == 3
+        assert fast_attempts < 3
+
 
 class TestProviderCompliance:
     """core.compliance.is_provider_compliant: unit-level."""
@@ -648,6 +796,9 @@ class TestVerifierComplianceGate:
         assert len(result.provenance.attempts) == 1
         assert result.provenance.attempts[0].error == "NO_COMPLIANT_PROVIDER"
         assert result.claims == []
+        # ADR-023: abstained_result() is a pre-dispatch gate failure -- no
+        # PolicyEngine call happens, so there is no decision to record.
+        assert result.policy_decision is None
 
     def test_compliant_provider_dispatches_normally(self) -> None:
         provider = _StaticTagProvider(tags=frozenset({"IN_PROCESS", "NO_EXTERNAL_EGRESS"}))

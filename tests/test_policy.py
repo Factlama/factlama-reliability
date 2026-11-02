@@ -211,3 +211,210 @@ class TestPolicyEngine:
             policy=None,
         )
         assert action == PolicyAction.PASS
+
+
+class TestPolicyEngineDecisionProvenance:
+    """ADR-023: `evaluate_with_decision()`'s `matched_rule_id`/`inputs_used`
+    must track `evaluate()`'s own action precedence exactly -- one test per
+    forced-override path, plus the default verdict-to-action mappings and
+    `inputs_used`'s token vocabulary."""
+
+    def setup_method(self) -> None:
+        self.engine = PolicyEngine()
+
+    def test_evaluate_returns_the_same_tuple_evaluate_with_decision_wraps(self) -> None:
+        """`evaluate()` must stay a thin wrapper: same action/violations as
+        the richer method, for every existing call site's sake."""
+        scores = {"groundedness": _score(1.0)}
+        action, violations = self.engine.evaluate(
+            verdict=OverallVerdict.PASS, scores=scores, violations=[]
+        )
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores=scores, violations=[]
+        )
+        assert (action, violations) == (draft.action, draft.additional_violations)
+
+    def test_default_pass_rule_id(self) -> None:
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores={}, violations=[]
+        )
+        assert draft.matched_rule_id == "DEFAULT_PASS"
+        assert draft.action == PolicyAction.PASS
+
+    def test_actions_on_failure_rule_id(self) -> None:
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.FAIL, scores={}, violations=[]
+        )
+        assert draft.matched_rule_id == "ACTIONS_ON_FAILURE"
+        assert draft.action == PolicyAction.FAIL
+
+    def test_actions_on_partial_rule_id(self) -> None:
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PARTIAL, scores={}, violations=[]
+        )
+        assert draft.matched_rule_id == "ACTIONS_ON_PARTIAL"
+        assert draft.action == PolicyAction.PASS
+
+    def test_actions_on_abstain_rule_id(self) -> None:
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.ABSTAIN, scores={}, violations=[]
+        )
+        assert draft.matched_rule_id == "ACTIONS_ON_ABSTAIN"
+        assert draft.action == PolicyAction.HUMAN_REVIEW
+
+    def test_tool_error_forces_fail_rule_id(self) -> None:
+        tool_error = Violation(code="TOOL_ERROR", severity=Severity.HIGH)
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.ABSTAIN, scores={}, violations=[tool_error]
+        )
+        assert draft.matched_rule_id == "TOOL_ERROR_FORCES_FAIL"
+        assert draft.action == Policy(id="default").actions.on_failure
+
+    def test_evidence_injection_suspected_rule_id(self) -> None:
+        violation = Violation(code="EVIDENCE_INJECTION_SUSPECTED", severity=Severity.HIGH)
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores={}, violations=[violation]
+        )
+        assert draft.matched_rule_id == "EVIDENCE_INJECTION_SUSPECTED_FORCES_HUMAN_REVIEW"
+        assert draft.action == PolicyAction.HUMAN_REVIEW
+
+    def test_citation_overlap_inconclusive_rule_id(self) -> None:
+        violation = Violation(code="CITATION_OVERLAP_INCONCLUSIVE", severity=Severity.MEDIUM)
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores={}, violations=[violation]
+        )
+        assert draft.matched_rule_id == "CITATION_OVERLAP_INCONCLUSIVE_FORCES_HUMAN_REVIEW"
+        assert draft.action == PolicyAction.HUMAN_REVIEW
+
+    def test_inputs_used_includes_verdict_and_inspected_scores_only(self) -> None:
+        """`contradiction_risk` is not one of the five dimensions this
+        engine's threshold checks look up -- it must not appear as a
+        SCORE: token even though it's present in `scores`."""
+        scores = {
+            "groundedness": _score(1.0),
+            "hallucination_risk": _na(),
+            "contradiction_risk": _score(0.0),
+        }
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores=scores, violations=[], has_citations=False
+        )
+        assert draft.inputs_used == ["SCORE:groundedness", "SCORE:hallucination_risk", "VERDICT"]
+
+    def test_inputs_used_citations_present_token_is_conditional(self) -> None:
+        draft_with = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores={}, violations=[], has_citations=True
+        )
+        draft_without = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores={}, violations=[], has_citations=False
+        )
+        assert "CITATIONS_PRESENT" in draft_with.inputs_used
+        assert "CITATIONS_PRESENT" not in draft_without.inputs_used
+
+    def test_inputs_used_includes_mode_and_application_tokens_when_supplied(self) -> None:
+        from schemas.verification import VerificationMode
+
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS,
+            scores={},
+            violations=[],
+            has_citations=False,
+            mode=VerificationMode.DEEP,
+            application_id="app-1",
+        )
+        assert "MODE:DEEP" in draft.inputs_used
+        assert "APPLICATION_PRESENT" in draft.inputs_used
+
+    def test_inputs_used_omits_mode_and_application_tokens_when_absent(self) -> None:
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores={}, violations=[], has_citations=False
+        )
+        assert not any(t.startswith("MODE:") for t in draft.inputs_used)
+        assert "APPLICATION_PRESENT" not in draft.inputs_used
+
+    def test_inputs_used_violation_tokens_are_sorted_and_deduplicated(self) -> None:
+        violations = [
+            Violation(code="TOOL_ERROR", severity=Severity.HIGH),
+            Violation(code="CITATION_MISMATCH", severity=Severity.HIGH),
+            Violation(code="TOOL_ERROR", severity=Severity.HIGH, claim_ids=["c2"]),
+        ]
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.ABSTAIN, scores={}, violations=violations
+        )
+        assert "VIOLATION:CITATION_MISMATCH" in draft.inputs_used
+        assert draft.inputs_used.count("VIOLATION:TOOL_ERROR") == 1
+        assert draft.inputs_used == sorted(draft.inputs_used)
+
+
+class TestRiskTierEscalation:
+    """EPIC-08 risk/cost routing: `policy.risk_tier` in
+    `policy.actions.escalate_risk_tiers` forces at least HUMAN_REVIEW, but
+    only ever escalates FROM a PASS -- it must never downgrade a stricter
+    action a tenant's own config, or another forced-override rule, already
+    selected."""
+
+    def setup_method(self) -> None:
+        self.engine = PolicyEngine()
+
+    def test_matching_risk_tier_escalates_pass_to_human_review(self) -> None:
+        policy = Policy(
+            id="test", actions=ActionPolicy(escalate_risk_tiers=["HIGH"]), risk_tier="HIGH"
+        )
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores={}, violations=[], policy=policy
+        )
+        assert draft.action == PolicyAction.HUMAN_REVIEW
+        assert draft.matched_rule_id == "RISK_TIER_ESCALATES_TO_HUMAN_REVIEW"
+
+    def test_non_matching_risk_tier_does_not_escalate(self) -> None:
+        policy = Policy(
+            id="test", actions=ActionPolicy(escalate_risk_tiers=["CRITICAL"]), risk_tier="LOW"
+        )
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores={}, violations=[], policy=policy
+        )
+        assert draft.action == PolicyAction.PASS
+        assert draft.matched_rule_id == "DEFAULT_PASS"
+
+    def test_no_risk_tier_does_not_escalate(self) -> None:
+        policy = Policy(id="test", actions=ActionPolicy(escalate_risk_tiers=["HIGH"]))
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores={}, violations=[], policy=policy
+        )
+        assert draft.action == PolicyAction.PASS
+
+    def test_escalation_never_downgrades_an_already_stricter_action(self) -> None:
+        """A FAIL verdict already selects on_failure -- a matching risk tier
+        must not downgrade that back toward HUMAN_REVIEW/PASS."""
+        policy = Policy(
+            id="test",
+            actions=ActionPolicy(on_failure=PolicyAction.BLOCK, escalate_risk_tiers=["HIGH"]),
+            risk_tier="HIGH",
+        )
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.FAIL, scores={}, violations=[], policy=policy
+        )
+        assert draft.action == PolicyAction.BLOCK
+        assert draft.matched_rule_id == "ACTIONS_ON_FAILURE"
+
+    def test_evidence_injection_override_still_wins_over_risk_tier_escalation(self) -> None:
+        """Both rules pick HUMAN_REVIEW here, but the more specific
+        judge-boundary signal should still be named as the matched rule."""
+        policy = Policy(
+            id="test", actions=ActionPolicy(escalate_risk_tiers=["HIGH"]), risk_tier="HIGH"
+        )
+        violation = Violation(code="EVIDENCE_INJECTION_SUSPECTED", severity=Severity.HIGH)
+        draft = self.engine.evaluate_with_decision(
+            verdict=OverallVerdict.PASS, scores={}, violations=[violation], policy=policy
+        )
+        assert draft.action == PolicyAction.HUMAN_REVIEW
+        assert draft.matched_rule_id == "EVIDENCE_INJECTION_SUSPECTED_FORCES_HUMAN_REVIEW"
+
+    def test_evaluate_wrapper_also_applies_risk_tier_escalation(self) -> None:
+        """The thin `evaluate()` wrapper must not lose this behavior."""
+        policy = Policy(
+            id="test", actions=ActionPolicy(escalate_risk_tiers=["HIGH"]), risk_tier="HIGH"
+        )
+        action, _violations = self.engine.evaluate(
+            verdict=OverallVerdict.PASS, scores={}, violations=[], policy=policy
+        )
+        assert action == PolicyAction.HUMAN_REVIEW

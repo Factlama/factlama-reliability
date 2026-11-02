@@ -208,4 +208,11 @@ class TestLiveApiResponseValidates:
             headers={"Authorization": "Bearer key-1"},
         )
         assert response.status_code == 200
-        _assert_valid(_verification_result_validator(), response.json())
+        body = response.json()
+        _assert_valid(_verification_result_validator(), body)
+        # ADR-023: confirms the live `exclude_none=True` serializer doesn't
+        # drop the populated object -- the same bug class F1 caught for
+        # usage_summary/scores (null where the schema expects omission, or
+        # here, omitted where a real decision should be present).
+        assert body["policy_decision"] is not None
+        assert body["policy_decision"]["mode"] == "ADVISORY"

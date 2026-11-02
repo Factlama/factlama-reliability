@@ -23,7 +23,7 @@ from schemas.claims import Claim, ClaimVerdict, RationaleCode
 from schemas.evidence import Evidence
 from schemas.policy import ExecutionStorageMode, ExecutionStoragePolicy, Policy
 from schemas.tenancy import TenantContext
-from schemas.verification import VerificationRequest
+from schemas.verification import VerificationMode, VerificationRequest
 from storage.models import ClaimedJob, JobState
 from storage.postgres.backend import PostgresStorageBackend
 from storage.postgres.registry import PostgresRevocationRegistry
@@ -111,6 +111,7 @@ def _request(
     project_id: str = "proj-a",
     application_id: str = "app-a",
     policy: Policy | None = None,
+    mode: VerificationMode = VerificationMode.STANDARD,
 ) -> VerificationRequest:
     return VerificationRequest(
         request_id=request_id,
@@ -120,6 +121,7 @@ def _request(
         claims=claims,
         evidence=evidence or [],
         policy=policy or _default_test_policy(),
+        mode=mode,
     )
 
 
@@ -367,6 +369,66 @@ async def test_budget_exceeded_before_dispatch_commits_abstained_budget_exhauste
     assert result.abstention_reason is not None
     assert result.abstention_reason.value == "BUDGET_EXHAUSTED"
     assert len(result.provenance.attempts) == 1  # one synthetic gate-failure marker, no judge calls
+
+
+async def test_fast_mode_abstains_under_a_cap_standard_mode_would_dispatch(
+    backend: PostgresStorageBackend,
+    registry: PostgresRevocationRegistry,
+) -> None:
+    """EPIC-03: `worker/runner.py`'s own pre-dispatch budget gate must use
+    the same per-mode `RoutingProfile` the synchronous `Verifier.verify()`
+    path does -- a job submitted under `FAST` must not get `STANDARD`'s
+    looser cap just because it went through the async path. Same claim
+    count (11) as the premise this test needs: over `FAST`'s cap (10),
+    within `STANDARD`'s (50)."""
+    from core.routing_profiles import routing_profile_for
+
+    fast_profile = routing_profile_for(VerificationMode.FAST)
+    standard_profile = routing_profile_for(VerificationMode.STANDARD)
+    claim_count = fast_profile.max_claims + 1
+    assert claim_count <= standard_profile.max_claims  # the premise this test needs
+
+    tenant = make_tenant()
+    claims = [Claim(claim_id=f"c{i}", text=f"claim {i}") for i in range(claim_count)]
+    fast_request = _request("req-fast-cap", claims=claims, mode=VerificationMode.FAST)
+    claimed = await _submit_and_claim(backend, tenant, fast_request, "key-fast-cap")
+
+    verifier = Verifier(model_provider=_ScriptedProvider([{}]))
+    await process_claimed_job(claimed, backend, verifier, _fast_settings(), registry)
+
+    status = await backend.get_job_status(tenant, claimed.job_id)
+    assert status is not None
+    assert status.state == JobState.SUCCEEDED
+    assert status.evaluation_id is not None
+    result = await backend.get_result(tenant, status.evaluation_id)
+    assert result is not None
+    assert result.abstention_reason is not None
+    assert result.abstention_reason.value == "BUDGET_EXHAUSTED"
+
+    # The identical claim count, same tenant, under STANDARD's looser cap,
+    # must dispatch normally instead of abstaining.
+    standard_request = _request(
+        "req-standard-within-cap",
+        claims=claims,
+        evidence=[Evidence(evidence_id="e1", content="some evidence")],
+        mode=VerificationMode.STANDARD,
+    )
+    standard_claimed = await _submit_and_claim(
+        backend, tenant, standard_request, "key-standard-cap"
+    )
+    standard_provider = _ScriptedProvider([{c.claim_id: _supported("e1") for c in claims}])
+    standard_verifier = Verifier(model_provider=standard_provider)
+    await process_claimed_job(
+        standard_claimed, backend, standard_verifier, _fast_settings(), registry
+    )
+    standard_status = await backend.get_job_status(tenant, standard_claimed.job_id)
+    assert standard_status is not None
+    assert standard_status.state == JobState.SUCCEEDED
+    assert standard_status.evaluation_id is not None
+    standard_result = await backend.get_result(tenant, standard_status.evaluation_id)
+    assert standard_result is not None
+    assert standard_result.abstention_reason is None
+    assert len(standard_result.provenance.attempts) == claim_count
 
 
 async def test_noncompliant_provider_commits_abstained_no_compliant_provider(

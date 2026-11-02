@@ -10,7 +10,7 @@ from schemas.citation import Citation
 from schemas.claims import Claim, ClaimVerification
 from schemas.evidence import Evidence
 from schemas.instruction import Instruction
-from schemas.policy import Policy
+from schemas.policy import Policy, PolicyDecision
 from schemas.tools import ToolExecution
 
 SUPPORTED_SCHEMA_MAJOR_VERSION = "0"
@@ -385,6 +385,15 @@ class VerificationResult(BaseModel):
     violations: list[Violation] = Field(default_factory=list, description="Detected violations")
     policy_action: str | None = Field(None, description="Recommended action based on policy")
     policy_version: str | None = Field(None, description="Version of the policy applied")
+    policy_decision: PolicyDecision | None = Field(
+        None,
+        description=(
+            "ADR-023's additive decision-provenance record. Present whenever "
+            "PolicyEngine actually ran; null on the two no-decision paths "
+            "(a pre-dispatch budget/compliance abstention, and the internal "
+            "pipeline-failure handler), which also leave policy_action null."
+        ),
+    )
     scoring_version: str = Field(default="0.1", description="Scoring algorithm version")
     provenance: Provenance = Field(..., description="How this result was produced")
     usage_summary: Usage = Field(

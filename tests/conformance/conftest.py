@@ -135,6 +135,7 @@ def make_request(
     application_id: str = "app-a",
     answer: str = "The sky is blue.",
     policy: Policy | None = None,
+    mode: VerificationMode = VerificationMode.STANDARD,
 ) -> VerificationRequest:
     return VerificationRequest(
         request_id=request_id,
@@ -142,6 +143,7 @@ def make_request(
         application_id=application_id,
         answer=answer,
         policy=policy or default_test_execution_storage_policy(),
+        mode=mode,
     )
 
 
